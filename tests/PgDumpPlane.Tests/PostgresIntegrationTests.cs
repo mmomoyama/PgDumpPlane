@@ -129,9 +129,11 @@ public sealed class PostgresIntegrationTests
             var insertScript = Encoding.UTF8.GetString(insertStream.ToArray());
 
             Assert.DoesNotContain($"COPY {qualifiedSchema}.", insertScript);
+            var parentInsertPrefix =
+                $"INSERT INTO {qualifiedSchema}.\"parent_first\" (\"id\", \"label\", \"state\", \"amount\", \"created_at\")";
             Assert.Contains(
-                $"INSERT INTO {qualifiedSchema}.\"parent_first\" (\"id\", \"label\", \"state\", \"amount\", \"created_at\") " +
-                "OVERRIDING SYSTEM VALUE VALUES ('1', 'hello",
+                parentInsertPrefix + (serverMajor >= 17 ? " OVERRIDING SYSTEM VALUE" : string.Empty) +
+                " VALUES ('1', 'hello",
                 insertScript);
             if (serverMajor >= 18)
             {
