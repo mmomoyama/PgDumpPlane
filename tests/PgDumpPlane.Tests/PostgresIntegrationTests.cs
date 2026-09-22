@@ -6,7 +6,7 @@ namespace PgDumpPlane.Tests;
 public sealed class PostgresIntegrationTests
 {
     [Fact]
-    public async Task DumpAsync_StreamsRestorableObjectKindsAndCopyData()
+    public async Task DumpAsync_StreamsRestorableObjectKindsAndTableData()
     {
         var connectionString = Environment.GetEnvironmentVariable("PGDUMPPLANE_TEST_CONNECTION");
         if (string.IsNullOrWhiteSpace(connectionString))
@@ -19,6 +19,8 @@ public sealed class PostgresIntegrationTests
         await connection.OpenAsync(cancellationToken);
         var serverMajor = connection.PostgreSqlVersion.Major;
         Assert.InRange(serverMajor, 12, 18);
+        var allByteValues = Enumerable.Range(0, 256).Select(x => (byte)x).ToArray();
+        var largeBinary = Enumerable.Range(0, 256 * 1024).Select(x => (byte)(x * 31)).ToArray();
         try
         {
             await using (var setup = new NpgsqlCommand($"""
@@ -39,6 +41,10 @@ public sealed class PostgresIntegrationTests
                 CREATE FUNCTION {qualifiedSchema}.normalize_label() RETURNS trigger
                     LANGUAGE plpgsql AS $$ BEGIN NEW.label := lower(NEW.label); RETURN NEW; END $$;
                 CREATE VIEW {qualifiedSchema}.parent_view AS SELECT id, label FROM {qualifiedSchema}.parent;
+                CREATE TABLE {qualifiedSchema}.binary_data (
+                    id integer PRIMARY KEY,
+                    payload bytea
+                );
                 """, connection))
             {
                 await setup.ExecuteNonQueryAsync(cancellationToken);
@@ -53,6 +59,17 @@ public sealed class PostgresIntegrationTests
                 """, connection))
             {
                 await dataSetup.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var binarySetup = new NpgsqlCommand($"""
+                INSERT INTO {qualifiedSchema}.binary_data (id, payload)
+                VALUES (1, NULL), (2, @empty), (3, @allByteValues), (4, @largeBinary)
+                """, connection))
+            {
+                binarySetup.Parameters.AddWithValue("empty", Array.Empty<byte>());
+                binarySetup.Parameters.AddWithValue("allByteValues", allByteValues);
+                binarySetup.Parameters.AddWithValue("largeBinary", largeBinary);
+                await binarySetup.ExecuteNonQueryAsync(cancellationToken);
             }
 
             if (serverMajor >= 14)
@@ -142,6 +159,31 @@ public sealed class PostgresIntegrationTests
                     insertScript);
             }
 
+            var copyHeader = $"COPY {qualifiedSchema}.\"binary_data\" (\"id\", \"payload\") FROM stdin;\n";
+            var copyStart = script.IndexOf(copyHeader, StringComparison.Ordinal);
+            Assert.True(copyStart >= 0, "The bytea COPY block was not written.");
+            copyStart += copyHeader.Length;
+            var copyEnd = script.IndexOf("\\.\n", copyStart, StringComparison.Ordinal);
+            Assert.True(copyEnd >= 0, "The bytea COPY block was not terminated.");
+            var copyRows = script[copyStart..copyEnd];
+
+            await using (var createCopyTarget = new NpgsqlCommand(
+                $"CREATE TABLE {qualifiedSchema}.binary_copy_restore (id integer PRIMARY KEY, payload bytea)", connection))
+            {
+                await createCopyTarget.ExecuteNonQueryAsync(cancellationToken);
+            }
+            await using (var copyWriter = await connection.BeginTextImportAsync(
+                $"COPY {qualifiedSchema}.binary_copy_restore (id, payload) FROM STDIN", cancellationToken))
+            {
+                await copyWriter.WriteAsync(copyRows);
+            }
+            await AssertBinaryRowsAsync(
+                connection,
+                $"{qualifiedSchema}.binary_copy_restore",
+                allByteValues,
+                largeBinary,
+                cancellationToken);
+
             await using (var dropSource = new NpgsqlCommand($"DROP SCHEMA {qualifiedSchema} CASCADE", connection))
                 await dropSource.ExecuteNonQueryAsync(cancellationToken);
             await using (var restore = new NpgsqlCommand(insertScript, connection))
@@ -158,11 +200,39 @@ public sealed class PostgresIntegrationTests
                     $"SELECT doubled FROM {qualifiedSchema}.generated_feature WHERE source = 7", connection);
                 Assert.Equal(14, await verifyGenerated.ExecuteScalarAsync(cancellationToken));
             }
+            await AssertBinaryRowsAsync(
+                connection,
+                $"{qualifiedSchema}.binary_data",
+                allByteValues,
+                largeBinary,
+                cancellationToken);
         }
         finally
         {
             await using var cleanup = new NpgsqlCommand($"DROP SCHEMA IF EXISTS {qualifiedSchema} CASCADE", connection);
             await cleanup.ExecuteNonQueryAsync(cancellationToken);
         }
+    }
+
+    private static async Task AssertBinaryRowsAsync(
+        NpgsqlConnection connection,
+        string qualifiedTable,
+        byte[] allByteValues,
+        byte[] largeBinary,
+        CancellationToken cancellationToken)
+    {
+        byte[]?[] expected = [null, [], allByteValues, largeBinary];
+        await using var command = new NpgsqlCommand($"SELECT id, payload FROM {qualifiedTable} ORDER BY id", connection);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        for (var index = 0; index < expected.Length; index++)
+        {
+            Assert.True(await reader.ReadAsync(cancellationToken));
+            Assert.Equal(index + 1, reader.GetInt32(0));
+            if (expected[index] is null)
+                Assert.True(reader.IsDBNull(1));
+            else
+                Assert.Equal(expected[index], reader.GetFieldValue<byte[]>(1));
+        }
+        Assert.False(await reader.ReadAsync(cancellationToken));
     }
 }
