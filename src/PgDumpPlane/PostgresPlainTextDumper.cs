@@ -199,10 +199,11 @@ public sealed class PostgresPlainTextDumper
 
         foreach (var routine in snapshot.Routines)
         {
-            await writer.WriteAsync(routine.Definition).ConfigureAwait(false);
-            if (!routine.Definition.EndsWith('\n'))
-                await writer.WriteAsync('\n').ConfigureAwait(false);
-            await writer.WriteAsync('\n').ConfigureAwait(false);
+            var definition = routine.Definition.TrimEnd();
+            await writer.WriteAsync(definition).ConfigureAwait(false);
+            if (!definition.EndsWith(';'))
+                await writer.WriteAsync(';').ConfigureAwait(false);
+            await writer.WriteAsync("\n\n").ConfigureAwait(false);
         }
 
         foreach (var sequence in snapshot.Sequences.Where(x => !x.IsIdentity))
@@ -306,17 +307,72 @@ public sealed class PostgresPlainTextDumper
         await SectionAsync(writer, "DATA").ConfigureAwait(false);
         foreach (var table in tables.Where(x => x.Kind == 'r' && (options.IncludeUnloggedTableData || !x.Unlogged)))
         {
-            var columns = table.Columns.Where(x => x.Generated == '\0').Select(x => x.Name).ToArray();
-            if (columns.Length == 0)
-                continue;
-            var columnList = string.Join(", ", columns.Select(SqlText.Identifier));
-            var qualified = SqlText.Qualified(table.Schema, table.Name);
-            var copy = $"COPY {qualified} ({columnList}) TO STDOUT";
-            await writer.WriteAsync($"-- Data for Name: {table.Name}; Schema: {table.Schema}\n\nCOPY {qualified} ({columnList}) FROM stdin;\n").ConfigureAwait(false);
-            await using var reader = await connection.BeginTextExportAsync(copy, cancellationToken).ConfigureAwait(false);
-            await CopyTextAsync(reader, writer, cancellationToken).ConfigureAwait(false);
-            await writer.WriteAsync("\\.\n\n").ConfigureAwait(false);
+            if (options.DataFormat == PgDumpDataFormat.Inserts)
+                await WriteTableInsertsAsync(connection, writer, table, cancellationToken).ConfigureAwait(false);
+            else
+                await WriteTableCopyAsync(connection, writer, table, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private static async Task WriteTableCopyAsync(
+        NpgsqlConnection connection,
+        TextWriter writer,
+        TableInfo table,
+        CancellationToken cancellationToken)
+    {
+        var columns = table.Columns.Where(x => x.Generated == '\0').Select(x => x.Name).ToArray();
+        if (columns.Length == 0)
+            return;
+
+        var columnList = string.Join(", ", columns.Select(SqlText.Identifier));
+        var qualified = SqlText.Qualified(table.Schema, table.Name);
+        var copy = $"COPY {qualified} ({columnList}) TO STDOUT";
+        await writer.WriteAsync($"-- Data for Name: {table.Name}; Schema: {table.Schema}\n\nCOPY {qualified} ({columnList}) FROM stdin;\n").ConfigureAwait(false);
+        await using var reader = await connection.BeginTextExportAsync(copy, cancellationToken).ConfigureAwait(false);
+        await CopyTextAsync(reader, writer, cancellationToken).ConfigureAwait(false);
+        await writer.WriteAsync("\\.\n\n").ConfigureAwait(false);
+    }
+
+    private static async Task WriteTableInsertsAsync(
+        NpgsqlConnection connection,
+        TextWriter writer,
+        TableInfo table,
+        CancellationToken cancellationToken)
+    {
+        var columns = table.Columns.Where(x => x.Generated == '\0').ToArray();
+        var qualified = SqlText.Qualified(table.Schema, table.Name);
+        var selectList = columns.Length == 0
+            ? "1"
+            : string.Join(", ", columns.Select(x => $"pg_catalog.quote_nullable({SqlText.Identifier(x.Name)})"));
+
+        await writer.WriteAsync($"-- Data for Name: {table.Name}; Schema: {table.Schema}\n\n").ConfigureAwait(false);
+        await using var command = new NpgsqlCommand($"SELECT {selectList} FROM {qualified}", connection);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+
+        if (columns.Length == 0)
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                await writer.WriteAsync($"INSERT INTO {qualified} DEFAULT VALUES;\n").ConfigureAwait(false);
+        }
+        else
+        {
+            var columnList = string.Join(", ", columns.Select(x => SqlText.Identifier(x.Name)));
+            var overriding = columns.Any(x => x.Identity == 'a') ? " OVERRIDING SYSTEM VALUE" : string.Empty;
+            var prefix = $"INSERT INTO {qualified} ({columnList}){overriding} VALUES (";
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                await writer.WriteAsync(prefix).ConfigureAwait(false);
+                for (var index = 0; index < columns.Length; index++)
+                {
+                    if (index > 0)
+                        await writer.WriteAsync(", ").ConfigureAwait(false);
+                    await writer.WriteAsync(reader.GetString(index)).ConfigureAwait(false);
+                }
+                await writer.WriteAsync(");\n").ConfigureAwait(false);
+            }
+        }
+
+        await writer.WriteAsync('\n').ConfigureAwait(false);
     }
 
     private static async Task WriteSequenceDataAsync(
@@ -342,9 +398,14 @@ public sealed class PostgresPlainTextDumper
     private static async Task WritePostDataAsync(TextWriter writer, CatalogSnapshot snapshot)
     {
         await SectionAsync(writer, "POST-DATA").ConfigureAwait(false);
+        var partitionedTables = snapshot.Tables
+            .Where(x => x.Kind == 'p')
+            .Select(x => (x.Schema, x.Name))
+            .ToHashSet();
         foreach (var constraint in snapshot.Constraints.Where(x => x.Type != 'f'))
         {
-            await writer.WriteAsync($"ALTER TABLE ONLY {SqlText.Qualified(constraint.Schema, constraint.Table)} ADD CONSTRAINT " +
+            var only = partitionedTables.Contains((constraint.Schema, constraint.Table)) ? string.Empty : "ONLY ";
+            await writer.WriteAsync($"ALTER TABLE {only}{SqlText.Qualified(constraint.Schema, constraint.Table)} ADD CONSTRAINT " +
                 $"{SqlText.Identifier(constraint.Name)} {constraint.Definition};\n\n").ConfigureAwait(false);
         }
         foreach (var index in snapshot.Indexes)
@@ -358,7 +419,8 @@ public sealed class PostgresPlainTextDumper
         }
         foreach (var constraint in snapshot.Constraints.Where(x => x.Type == 'f'))
         {
-            await writer.WriteAsync($"ALTER TABLE ONLY {SqlText.Qualified(constraint.Schema, constraint.Table)} ADD CONSTRAINT " +
+            var only = partitionedTables.Contains((constraint.Schema, constraint.Table)) ? string.Empty : "ONLY ";
+            await writer.WriteAsync($"ALTER TABLE {only}{SqlText.Qualified(constraint.Schema, constraint.Table)} ADD CONSTRAINT " +
                 $"{SqlText.Identifier(constraint.Name)} {constraint.Definition};\n\n").ConfigureAwait(false);
         }
         foreach (var view in TopologicalViews(snapshot.Views))

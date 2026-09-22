@@ -6,6 +6,7 @@ internal sealed record PostgresVersionCapabilities(int Major)
     internal const int MaximumSupportedMajor = 18;
 
     internal bool SupportsColumnCompression => Major >= 14;
+    internal bool SupportsPartitionTriggerClones => Major >= 13;
     internal bool SupportsUnloggedSequences => Major >= 15;
     internal bool SupportsTransactionTimeout => Major >= 17;
     internal bool SupportsVirtualGeneratedColumns => Major >= 18;

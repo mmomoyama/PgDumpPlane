@@ -20,6 +20,7 @@ public sealed class PostgresVersionCapabilitiesTests
         var capabilities = PostgresVersionCapabilities.Create(new Version(major, 0));
 
         Assert.Equal(columnCompression, capabilities.SupportsColumnCompression);
+        Assert.Equal(major >= 13, capabilities.SupportsPartitionTriggerClones);
         Assert.Equal(unloggedSequences, capabilities.SupportsUnloggedSequences);
         Assert.Equal(transactionTimeout, capabilities.SupportsTransactionTimeout);
         Assert.Equal(postgresql18Features, capabilities.SupportsVirtualGeneratedColumns);

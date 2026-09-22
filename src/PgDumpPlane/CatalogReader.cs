@@ -25,7 +25,7 @@ internal static class CatalogReader
 
         var constraints = await ReadConstraintsAsync(connection, tableOids, cancellationToken).ConfigureAwait(false);
         var indexes = await ReadIndexesAsync(connection, tableOids, cancellationToken).ConfigureAwait(false);
-        var triggers = await ReadTriggersAsync(connection, tableOids, cancellationToken).ConfigureAwait(false);
+        var triggers = await ReadTriggersAsync(connection, tableOids, capabilities, cancellationToken).ConfigureAwait(false);
 
         return new(database, schemas, extensions, enums, routines, sequences, tables, views, constraints, indexes, triggers);
     }
@@ -420,14 +420,17 @@ internal static class CatalogReader
     private static async Task<IReadOnlyList<TriggerInfo>> ReadTriggersAsync(
         NpgsqlConnection connection,
         ISet<uint> selectedOids,
+        PostgresVersionCapabilities capabilities,
         CancellationToken cancellationToken)
     {
-        const string sql = """
+        var cloneFilter = capabilities.SupportsPartitionTriggerClones ? "AND t.tgparentid = 0" : string.Empty;
+        var sql = $"""
             SELECT n.nspname, c.relname, t.tgname, pg_catalog.pg_get_triggerdef(t.oid, true), t.tgrelid
             FROM pg_catalog.pg_trigger t
             JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
             WHERE NOT t.tgisinternal
+              {cloneFilter}
             ORDER BY n.nspname, c.relname, t.tgname
             """;
         var result = new List<TriggerInfo>();

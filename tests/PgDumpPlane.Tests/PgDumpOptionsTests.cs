@@ -3,6 +3,12 @@ namespace PgDumpPlane.Tests;
 public sealed class PgDumpOptionsTests
 {
     [Fact]
+    public void DataFormat_DefaultsToCopy()
+    {
+        Assert.Equal(PgDumpDataFormat.Copy, new PgDumpOptions().DataFormat);
+    }
+
+    [Fact]
     public void Includes_UsesIncludeThenExclude()
     {
         var options = new PgDumpOptions();
@@ -20,5 +26,13 @@ public sealed class PgDumpOptionsTests
         var options = new PgDumpOptions { IncludeSchema = false, IncludeData = false };
 
         Assert.Throws<ArgumentException>(options.Validate);
+    }
+
+    [Fact]
+    public void Validate_RejectsUnknownDataFormat()
+    {
+        var options = new PgDumpOptions { DataFormat = (PgDumpDataFormat)99 };
+
+        Assert.Throws<ArgumentOutOfRangeException>(options.Validate);
     }
 }

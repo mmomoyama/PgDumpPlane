@@ -6,9 +6,9 @@ the native `pg_dump` executable.
 
 The implementation follows the important ordering and consistency rules in
 PostgreSQL's `src/bin/pg_dump`: catalog and data reads share a read-only
-snapshot, table data is streamed with an explicit-column `COPY`, sequence
-state is emitted separately with `setval`, and indexes and constraints are
-written after table data.
+snapshot, table data is streamed with an explicit-column `COPY` or `INSERT`,
+sequence state is emitted separately with `setval`, and indexes and constraints
+are written after table data.
 
 ## Install
 
@@ -37,6 +37,18 @@ You can also pass an `NpgsqlDataSource`, or an open `NpgsqlConnection` and a
 Rows are copied directly from Npgsql's text COPY reader to the destination, so
 large tables are not buffered in memory.
 
+To generate explicit-column `INSERT` statements instead of COPY blocks:
+
+```csharp
+var options = new PgDumpOptions
+{
+    DataFormat = PgDumpDataFormat.Inserts
+};
+```
+
+INSERT rows are also streamed without buffering the whole table. COPY remains
+the default because it is smaller and generally restores faster.
+
 Restore with a current `psql` client:
 
 ```shell
@@ -55,7 +67,7 @@ The package supports PostgreSQL 12 through 18 and writes:
 - enum types and routines;
 - ordinary, unlogged, and partitioned tables;
 - sequences, ownership, and current sequence state;
-- table rows in PostgreSQL text `COPY` format;
+- table rows in PostgreSQL text `COPY` format or explicit-column `INSERT` statements;
 - primary, unique, check, exclusion, and foreign-key constraints;
 - standalone indexes, views, and triggers.
 

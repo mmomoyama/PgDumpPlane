@@ -78,6 +78,7 @@ public sealed class PostgresIntegrationTests
                         source integer CONSTRAINT source_required NOT NULL,
                         doubled integer GENERATED ALWAYS AS (source * 2)
                     );
+                    INSERT INTO {qualifiedSchema}.generated_feature (source) VALUES (7);
                     """, connection);
                 await version18Setup.ExecuteNonQueryAsync(cancellationToken);
             }
@@ -111,6 +112,49 @@ public sealed class PostgresIntegrationTests
             {
                 Assert.Contains("CONSTRAINT \"source_required\" NOT NULL", script);
                 Assert.Contains("GENERATED ALWAYS AS ((source * 2))", script);
+            }
+
+            var insertOptions = new PgDumpOptions
+            {
+                DataFormat = PgDumpDataFormat.Inserts,
+                UsePsqlRestrict = false
+            };
+            insertOptions.IncludeSchemas.Add(schema);
+            await using var insertStream = new MemoryStream();
+            await new PostgresPlainTextDumper().DumpAsync(
+                connection,
+                new StreamWriter(insertStream, new UTF8Encoding(false), leaveOpen: true),
+                insertOptions,
+                cancellationToken);
+            var insertScript = Encoding.UTF8.GetString(insertStream.ToArray());
+
+            Assert.DoesNotContain($"COPY {qualifiedSchema}.", insertScript);
+            Assert.Contains(
+                $"INSERT INTO {qualifiedSchema}.\"parent_first\" (\"id\", \"label\", \"state\", \"amount\", \"created_at\") " +
+                "OVERRIDING SYSTEM VALUE VALUES ('1', 'hello",
+                insertScript);
+            if (serverMajor >= 18)
+            {
+                Assert.Contains(
+                    $"INSERT INTO {qualifiedSchema}.\"generated_feature\" (\"source\") VALUES ('7');",
+                    insertScript);
+            }
+
+            await using (var dropSource = new NpgsqlCommand($"DROP SCHEMA {qualifiedSchema} CASCADE", connection))
+                await dropSource.ExecuteNonQueryAsync(cancellationToken);
+            await using (var restore = new NpgsqlCommand(insertScript, connection))
+                await restore.ExecuteNonQueryAsync(cancellationToken);
+
+            await using (var verify = new NpgsqlCommand(
+                $"SELECT label FROM {qualifiedSchema}.parent_first WHERE id = 1", connection))
+            {
+                Assert.Equal("hello\nworld", await verify.ExecuteScalarAsync(cancellationToken));
+            }
+            if (serverMajor >= 18)
+            {
+                await using var verifyGenerated = new NpgsqlCommand(
+                    $"SELECT doubled FROM {qualifiedSchema}.generated_feature WHERE source = 7", connection);
+                Assert.Equal(14, await verifyGenerated.ExecuteScalarAsync(cancellationToken));
             }
         }
         finally

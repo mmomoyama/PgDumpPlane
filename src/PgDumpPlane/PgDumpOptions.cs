@@ -1,5 +1,15 @@
 namespace PgDumpPlane;
 
+/// <summary>Specifies how table rows are represented in the dump.</summary>
+public enum PgDumpDataFormat
+{
+    /// <summary>Use PostgreSQL text COPY blocks. This is the default and fastest format.</summary>
+    Copy,
+
+    /// <summary>Use one explicit-column INSERT statement per row.</summary>
+    Inserts
+}
+
 /// <summary>Controls which parts of a database are written to the SQL script.</summary>
 public sealed class PgDumpOptions
 {
@@ -14,6 +24,9 @@ public sealed class PgDumpOptions
 
     /// <summary>Write table rows and sequence state. Defaults to <see langword="true"/>.</summary>
     public bool IncludeData { get; set; } = true;
+
+    /// <summary>Controls whether rows are written as COPY blocks or INSERT statements.</summary>
+    public PgDumpDataFormat DataFormat { get; set; } = PgDumpDataFormat.Copy;
 
     /// <summary>Dump unlogged table rows. This corresponds to the inverse of pg_dump's --no-unlogged-table-data.</summary>
     public bool IncludeUnloggedTableData { get; set; } = true;
@@ -31,6 +44,8 @@ public sealed class PgDumpOptions
     {
         if (!IncludeSchema && !IncludeData)
             throw new ArgumentException("At least one of IncludeSchema and IncludeData must be enabled.");
+        if (!Enum.IsDefined(DataFormat))
+            throw new ArgumentOutOfRangeException(nameof(DataFormat), DataFormat, "Unknown data format.");
     }
 
     internal bool Includes(string schema) =>
