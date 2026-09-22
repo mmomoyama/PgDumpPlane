@@ -38,14 +38,21 @@ public sealed class PostgresIntegrationTests
                 CREATE INDEX parent_label_idx ON {qualifiedSchema}.parent (label);
                 CREATE FUNCTION {qualifiedSchema}.normalize_label() RETURNS trigger
                     LANGUAGE plpgsql AS $$ BEGIN NEW.label := lower(NEW.label); RETURN NEW; END $$;
-                CREATE TRIGGER normalize_label BEFORE INSERT ON {qualifiedSchema}.parent
-                    FOR EACH ROW EXECUTE FUNCTION {qualifiedSchema}.normalize_label();
                 CREATE VIEW {qualifiedSchema}.parent_view AS SELECT id, label FROM {qualifiedSchema}.parent;
+                """, connection))
+            {
+                await setup.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var triggerTable = serverMajor == 12 ? "parent_first" : "parent";
+            await using (var dataSetup = new NpgsqlCommand($"""
+                CREATE TRIGGER normalize_label BEFORE INSERT ON {qualifiedSchema}.{SqlText.Identifier(triggerTable)}
+                    FOR EACH ROW EXECUTE FUNCTION {qualifiedSchema}.normalize_label();
                 INSERT INTO {qualifiedSchema}.parent (id, label, amount)
                     OVERRIDING SYSTEM VALUE VALUES (1, E'Hello\nworld', 12.50);
                 """, connection))
             {
-                await setup.ExecuteNonQueryAsync(cancellationToken);
+                await dataSetup.ExecuteNonQueryAsync(cancellationToken);
             }
 
             if (serverMajor >= 14)
