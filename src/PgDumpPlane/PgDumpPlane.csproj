@@ -5,11 +5,13 @@
     <RootNamespace>PgDumpPlane</RootNamespace>
     <PackageId>PgDumpPlane</PackageId>
     <Version>0.1.0</Version>
-    <Authors>PgDumpPlane contributors</Authors>
+    <Authors>mmomoyama</Authors>
     <Description>Streams a PostgreSQL database as a pg_dump-style plain-text SQL script using Npgsql.</Description>
     <PackageTags>postgresql;pg_dump;backup;npgsql;sql</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/mmomoyama/PgDumpPlane</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/mmomoyama/PgDumpPlane.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <IncludeSymbols>true</IncludeSymbols>
