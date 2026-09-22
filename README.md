@@ -49,7 +49,7 @@ guard used by current PostgreSQL releases.
 
 ## Current scope
 
-The package supports PostgreSQL 13 or later and writes:
+The package supports PostgreSQL 12 through 18 and writes:
 
 - user schemas and extensions;
 - enum types and routines;
@@ -58,6 +58,23 @@ The package supports PostgreSQL 13 or later and writes:
 - table rows in PostgreSQL text `COPY` format;
 - primary, unique, check, exclusion, and foreign-key constraints;
 - standalone indexes, views, and triggers.
+
+Version-specific catalog and SQL differences are selected from the connected
+server's major version:
+
+| PostgreSQL | Version-specific handling |
+| --- | --- |
+| 12–13 | Stored generated columns and the common PostgreSQL 12 catalog baseline |
+| 14 | Per-column `pglz`/`lz4` compression |
+| 15 | Unlogged sequences and `NULLS NOT DISTINCT` constraints |
+| 16 | PostgreSQL 16 catalog-compatible output |
+| 17 | `transaction_timeout` session and restore settings |
+| 18 | Virtual generated columns and named/`NO INHERIT` NOT NULL constraints |
+
+Constraint syntax introduced by newer releases is retained through
+`pg_get_constraintdef()`. Servers older than 12 and newer than 18 are rejected
+instead of risking an invalid dump. CI runs the integration test against every
+PostgreSQL major version from 12 through 18.
 
 This is not yet a byte-for-byte or feature-complete replacement for native
 `pg_dump`. Version 0.1 does not dump ownership/ACLs, comments, domains,

@@ -1,6 +1,6 @@
 namespace PgDumpPlane;
 
-internal sealed record DatabaseInfo(string Name, string ServerVersion);
+internal sealed record DatabaseInfo(string Name, string ServerVersion, int ServerMajorVersion);
 internal sealed record SchemaInfo(string Name);
 internal sealed record ExtensionInfo(string Name, string Schema, string Version);
 internal sealed record EnumTypeInfo(string Schema, string Name, IReadOnlyList<string> Labels);
@@ -30,7 +30,10 @@ internal sealed record ColumnInfo(
     string? DefaultExpression,
     char Identity,
     char Generated,
-    string? Collation);
+    string? Collation,
+    string? Compression,
+    string? NotNullConstraintName,
+    bool NotNullNoInherit);
 
 internal sealed record TableInfo(
     uint Oid,

@@ -17,6 +17,8 @@ public sealed class PostgresIntegrationTests
         var qualifiedSchema = SqlText.Identifier(schema);
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
+        var serverMajor = connection.PostgreSqlVersion.Major;
+        Assert.InRange(serverMajor, 12, 18);
         try
         {
             await using (var setup = new NpgsqlCommand($"""
@@ -40,10 +42,37 @@ public sealed class PostgresIntegrationTests
                     FOR EACH ROW EXECUTE FUNCTION {qualifiedSchema}.normalize_label();
                 CREATE VIEW {qualifiedSchema}.parent_view AS SELECT id, label FROM {qualifiedSchema}.parent;
                 INSERT INTO {qualifiedSchema}.parent (id, label, amount)
-                    OVERRIDING SYSTEM VALUE VALUES (1, E'Hello\\nworld', 12.50);
+                    OVERRIDING SYSTEM VALUE VALUES (1, E'Hello\nworld', 12.50);
                 """, connection))
             {
                 await setup.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (serverMajor >= 14)
+            {
+                await using var compressionSetup = new NpgsqlCommand(
+                    $"CREATE TABLE {qualifiedSchema}.compressed_data (payload text COMPRESSION pglz)", connection);
+                await compressionSetup.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (serverMajor >= 15)
+            {
+                await using var version15Setup = new NpgsqlCommand($"""
+                    CREATE UNLOGGED SEQUENCE {qualifiedSchema}.unlogged_counter;
+                    CREATE TABLE {qualifiedSchema}.nulls_feature (value integer, UNIQUE NULLS NOT DISTINCT (value));
+                    """, connection);
+                await version15Setup.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (serverMajor >= 18)
+            {
+                await using var version18Setup = new NpgsqlCommand($"""
+                    CREATE TABLE {qualifiedSchema}.generated_feature (
+                        source integer CONSTRAINT source_required NOT NULL,
+                        doubled integer GENERATED ALWAYS AS (source * 2)
+                    );
+                    """, connection);
+                await version18Setup.ExecuteNonQueryAsync(cancellationToken);
             }
 
             var options = new PgDumpOptions { UsePsqlRestrict = false };
@@ -56,12 +85,26 @@ public sealed class PostgresIntegrationTests
             Assert.Contains($"CREATE TABLE {qualifiedSchema}.\"parent\"", script);
             Assert.Contains($"CREATE TABLE {qualifiedSchema}.\"parent_first\" PARTITION OF", script);
             Assert.Contains($"COPY {qualifiedSchema}.\"parent_first\"", script);
-            Assert.Contains("Hello\\nworld", script);
+            Assert.Contains("hello\\nworld", script);
             Assert.Contains("ADD CONSTRAINT \"parent_pk\" PRIMARY KEY", script);
             Assert.Contains("CREATE INDEX parent_label_idx", script);
             Assert.Contains($"CREATE VIEW {qualifiedSchema}.\"parent_view\"", script);
             Assert.Contains("CREATE TRIGGER normalize_label", script);
             Assert.Contains("pg_catalog.setval", script);
+            Assert.Equal(serverMajor >= 17, script.Contains("SET transaction_timeout = 0;", StringComparison.Ordinal));
+
+            if (serverMajor >= 14)
+                Assert.Contains("SET COMPRESSION pglz", script);
+            if (serverMajor >= 15)
+            {
+                Assert.Contains($"CREATE UNLOGGED SEQUENCE {qualifiedSchema}.\"unlogged_counter\"", script);
+                Assert.Contains("UNIQUE NULLS NOT DISTINCT", script);
+            }
+            if (serverMajor >= 18)
+            {
+                Assert.Contains("CONSTRAINT \"source_required\" NOT NULL", script);
+                Assert.Contains("GENERATED ALWAYS AS ((source * 2))", script);
+            }
         }
         finally
         {

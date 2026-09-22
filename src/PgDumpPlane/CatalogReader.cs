@@ -7,9 +7,10 @@ internal static class CatalogReader
     internal static async Task<CatalogSnapshot> ReadAsync(
         NpgsqlConnection connection,
         PgDumpOptions options,
+        PostgresVersionCapabilities capabilities,
         CancellationToken cancellationToken)
     {
-        var database = await ReadDatabaseAsync(connection, cancellationToken).ConfigureAwait(false);
+        var database = await ReadDatabaseAsync(connection, capabilities, cancellationToken).ConfigureAwait(false);
         var schemas = await ReadSchemasAsync(connection, options, cancellationToken).ConfigureAwait(false);
         var selected = schemas.Select(x => x.Name).ToHashSet(StringComparer.Ordinal);
 
@@ -17,8 +18,8 @@ internal static class CatalogReader
         var extensions = await ReadExtensionsAsync(connection, selected, cancellationToken).ConfigureAwait(false);
         var enums = await ReadEnumsAsync(connection, selected, cancellationToken).ConfigureAwait(false);
         var routines = await ReadRoutinesAsync(connection, selected, cancellationToken).ConfigureAwait(false);
-        var sequences = await ReadSequencesAsync(connection, selected, cancellationToken).ConfigureAwait(false);
-        var tables = await ReadTablesAsync(connection, selected, cancellationToken).ConfigureAwait(false);
+        var sequences = await ReadSequencesAsync(connection, selected, capabilities, cancellationToken).ConfigureAwait(false);
+        var tables = await ReadTablesAsync(connection, selected, capabilities, cancellationToken).ConfigureAwait(false);
         var views = await ReadViewsAsync(connection, selected, cancellationToken).ConfigureAwait(false);
         var tableOids = tables.Select(x => x.Oid).ToHashSet();
 
@@ -29,12 +30,15 @@ internal static class CatalogReader
         return new(database, schemas, extensions, enums, routines, sequences, tables, views, constraints, indexes, triggers);
     }
 
-    private static async Task<DatabaseInfo> ReadDatabaseAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<DatabaseInfo> ReadDatabaseAsync(
+        NpgsqlConnection connection,
+        PostgresVersionCapabilities capabilities,
+        CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand("SELECT current_database(), current_setting('server_version')", connection);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-        return new(reader.GetString(0), reader.GetString(1));
+        return new(reader.GetString(0), reader.GetString(1), capabilities.Major);
     }
 
     private static async Task<IReadOnlyList<SchemaInfo>> ReadSchemasAsync(
@@ -146,10 +150,14 @@ internal static class CatalogReader
     private static async Task<IReadOnlyList<SequenceInfo>> ReadSequencesAsync(
         NpgsqlConnection connection,
         ISet<string> selected,
+        PostgresVersionCapabilities capabilities,
         CancellationToken cancellationToken)
     {
-        const string sql = """
-            SELECT c.oid, n.nspname, c.relname, c.relpersistence = 'u',
+        var unloggedExpression = capabilities.SupportsUnloggedSequences
+            ? "c.relpersistence = 'u'"
+            : "false";
+        var sql = $"""
+            SELECT c.oid, n.nspname, c.relname, {unloggedExpression},
                    pg_catalog.format_type(s.seqtypid, NULL),
                    s.seqstart, s.seqmin, s.seqmax, s.seqincrement, s.seqcache, s.seqcycle,
                    tn.nspname, tc.relname, a.attname, d.deptype = 'i'
@@ -191,6 +199,7 @@ internal static class CatalogReader
     private static async Task<IReadOnlyList<TableInfo>> ReadTablesAsync(
         NpgsqlConnection connection,
         ISet<string> selected,
+        PostgresVersionCapabilities capabilities,
         CancellationToken cancellationToken)
     {
         const string tableSql = """
@@ -228,7 +237,7 @@ internal static class CatalogReader
         }
 
         var selectedOids = tableRows.Select(x => x.Oid).ToHashSet();
-        var columns = await ReadColumnsAsync(connection, selectedOids, cancellationToken).ConfigureAwait(false);
+        var columns = await ReadColumnsAsync(connection, selectedOids, capabilities, cancellationToken).ConfigureAwait(false);
         return tableRows.Select(x => new TableInfo(x.Oid, x.Schema, x.Name, x.Kind, x.Unlogged, x.Key, x.Parent, x.ParentSchema, x.ParentName, x.Bound,
             x.Options, x.Tablespace, columns.GetValueOrDefault(x.Oid) ?? [])).ToArray();
     }
@@ -236,18 +245,35 @@ internal static class CatalogReader
     private static async Task<Dictionary<uint, IReadOnlyList<ColumnInfo>>> ReadColumnsAsync(
         NpgsqlConnection connection,
         ISet<uint> selectedOids,
+        PostgresVersionCapabilities capabilities,
         CancellationToken cancellationToken)
     {
-        const string sql = """
+        var compressionExpression = capabilities.SupportsColumnCompression
+            ? "CASE a.attcompression WHEN 'p' THEN 'pglz' WHEN 'l' THEN 'lz4' END"
+            : "NULL::text";
+        var notNullFields = capabilities.SupportsNamedNotNullConstraints
+            ? "nn.conname, COALESCE(nn.connoinherit, false)"
+            : "NULL::text, false";
+        var notNullJoin = capabilities.SupportsNamedNotNullConstraints
+            ? """
+              LEFT JOIN pg_catalog.pg_constraint nn
+                ON nn.conrelid = a.attrelid
+               AND nn.contype = 'n'
+               AND nn.conkey = array[a.attnum]
+              """
+            : string.Empty;
+        var sql = $"""
             SELECT a.attrelid, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), a.attnotnull,
                    pg_catalog.pg_get_expr(ad.adbin, ad.adrelid), a.attidentity::text, a.attgenerated::text,
                    CASE WHEN a.attcollation <> t.typcollation
-                        THEN pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(co.collname) END
+                        THEN pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(co.collname) END,
+                   {compressionExpression}, {notNullFields}
             FROM pg_catalog.pg_attribute a
             JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
             LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
             LEFT JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
             LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = co.collnamespace
+            {notNullJoin}
             WHERE a.attnum > 0 AND NOT a.attisdropped
             ORDER BY a.attrelid, a.attnum
             """;
@@ -266,7 +292,7 @@ internal static class CatalogReader
             var generatedText = reader.GetString(6);
             list.Add(new(reader.GetString(1), reader.GetString(2), reader.GetBoolean(3), GetNullableString(reader, 4),
                 identityText.Length == 0 ? '\0' : identityText[0], generatedText.Length == 0 ? '\0' : generatedText[0],
-                GetNullableString(reader, 7)));
+                GetNullableString(reader, 7), GetNullableString(reader, 8), GetNullableString(reader, 9), reader.GetBoolean(10)));
         }
         foreach (var pair in mutable)
             result.Add(pair.Key, pair.Value);

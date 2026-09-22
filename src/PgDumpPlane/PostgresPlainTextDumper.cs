@@ -100,7 +100,8 @@ public sealed class PostgresPlainTextDumper
         if (connection.Database is null)
             throw new InvalidOperationException("The connection must select a database.");
 
-        await ConfigureSessionAsync(connection, cancellationToken).ConfigureAwait(false);
+        var capabilities = PostgresVersionCapabilities.Create(connection.PostgreSqlVersion);
+        await ConfigureSessionAsync(connection, capabilities, cancellationToken).ConfigureAwait(false);
         var isolation = options.SerializableDeferrable ? IsolationLevel.Serializable : IsolationLevel.RepeatableRead;
         await using var transaction = await connection.BeginTransactionAsync(isolation, cancellationToken).ConfigureAwait(false);
         try
@@ -110,9 +111,7 @@ public sealed class PostgresPlainTextDumper
                 : "SET TRANSACTION READ ONLY";
             await ExecuteAsync(connection, transactionMode, cancellationToken).ConfigureAwait(false);
 
-            var snapshot = await CatalogReader.ReadAsync(connection, options, cancellationToken).ConfigureAwait(false);
-            if (connection.PostgreSqlVersion.Major < 13)
-                throw new NotSupportedException("PgDumpPlane supports PostgreSQL 13 and later.");
+            var snapshot = await CatalogReader.ReadAsync(connection, options, capabilities, cancellationToken).ConfigureAwait(false);
 
             var restrictKey = options.UsePsqlRestrict ? RandomNumberGenerator.GetHexString(32) : null;
             await WriteHeaderAsync(writer, snapshot.Database, restrictKey).ConfigureAwait(false);
@@ -141,9 +140,12 @@ public sealed class PostgresPlainTextDumper
         }
     }
 
-    private static async Task ConfigureSessionAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    private static async Task ConfigureSessionAsync(
+        NpgsqlConnection connection,
+        PostgresVersionCapabilities capabilities,
+        CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = """
             SET statement_timeout = 0;
             SET lock_timeout = 0;
             SET idle_in_transaction_session_timeout = 0;
@@ -153,6 +155,8 @@ public sealed class PostgresPlainTextDumper
             SET synchronize_seqscans = off;
             SET row_security = off;
             """;
+        if (capabilities.SupportsTransactionTimeout)
+            sql += "\nSET transaction_timeout = 0;";
         await ExecuteAsync(connection, sql, cancellationToken).ConfigureAwait(false);
     }
 
@@ -170,6 +174,8 @@ public sealed class PostgresPlainTextDumper
         await writer.WriteAsync($"-- Dumped from database version {database.ServerVersion}\n").ConfigureAwait(false);
         await writer.WriteAsync("-- Dumped by PgDumpPlane 0.1.0\n\n").ConfigureAwait(false);
         await writer.WriteAsync("SET statement_timeout = 0;\nSET lock_timeout = 0;\nSET idle_in_transaction_session_timeout = 0;\n").ConfigureAwait(false);
+        if (database.ServerMajorVersion >= 17)
+            await writer.WriteAsync("SET transaction_timeout = 0;\n").ConfigureAwait(false);
         await writer.WriteAsync("SET client_encoding = 'UTF8';\nSET standard_conforming_strings = on;\nSELECT pg_catalog.set_config('search_path', '', false);\n").ConfigureAwait(false);
         await writer.WriteAsync("SET check_function_bodies = false;\nSET xmloption = content;\nSET client_min_messages = warning;\nSET row_security = off;\n\n").ConfigureAwait(false);
     }
@@ -232,6 +238,7 @@ public sealed class PostgresPlainTextDumper
         {
             await writer.WriteAsync($"CREATE TABLE {qualified} PARTITION OF {SqlText.Qualified(table.ParentSchema, table.ParentName)} {table.PartitionBound}").ConfigureAwait(false);
             await WriteTableTailAsync(writer, table).ConfigureAwait(false);
+            await WriteColumnPropertiesAsync(writer, table).ConfigureAwait(false);
             return;
         }
 
@@ -250,13 +257,20 @@ public sealed class PostgresPlainTextDumper
             else if (column.DefaultExpression is not null)
                 await writer.WriteAsync($" DEFAULT {column.DefaultExpression}").ConfigureAwait(false);
             if (column.NotNull)
+            {
+                if (column.NotNullConstraintName is not null)
+                    await writer.WriteAsync($" CONSTRAINT {SqlText.Identifier(column.NotNullConstraintName)}").ConfigureAwait(false);
                 await writer.WriteAsync(" NOT NULL").ConfigureAwait(false);
+                if (column.NotNullNoInherit)
+                    await writer.WriteAsync(" NO INHERIT").ConfigureAwait(false);
+            }
             await writer.WriteAsync(index + 1 == table.Columns.Count ? "\n" : ",\n").ConfigureAwait(false);
         }
         await writer.WriteAsync(")").ConfigureAwait(false);
         if (table.Kind == 'p' && table.PartitionKey is not null)
             await writer.WriteAsync($" PARTITION BY {table.PartitionKey}").ConfigureAwait(false);
         await WriteTableTailAsync(writer, table).ConfigureAwait(false);
+        await WriteColumnPropertiesAsync(writer, table).ConfigureAwait(false);
     }
 
     private static async Task WriteTableTailAsync(TextWriter writer, TableInfo table)
@@ -266,6 +280,20 @@ public sealed class PostgresPlainTextDumper
         if (!string.IsNullOrWhiteSpace(table.Tablespace))
             await writer.WriteAsync($" TABLESPACE {SqlText.Identifier(table.Tablespace)}").ConfigureAwait(false);
         await writer.WriteAsync(";\n\n").ConfigureAwait(false);
+    }
+
+    private static async Task WriteColumnPropertiesAsync(TextWriter writer, TableInfo table)
+    {
+        var qualified = SqlText.Qualified(table.Schema, table.Name);
+        foreach (var column in table.Columns.Where(x => x.Compression is not null))
+        {
+            await writer.WriteAsync(
+                $"ALTER TABLE ONLY {qualified} ALTER COLUMN {SqlText.Identifier(column.Name)} " +
+                $"SET COMPRESSION {column.Compression};\n").ConfigureAwait(false);
+        }
+
+        if (table.Columns.Any(x => x.Compression is not null))
+            await writer.WriteAsync('\n').ConfigureAwait(false);
     }
 
     private static async Task WriteTableDataAsync(
