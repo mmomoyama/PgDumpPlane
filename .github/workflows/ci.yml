@@ -29,9 +29,23 @@ jobs:
       PGDUMPPLANE_TEST_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
       - run: dotnet restore PgDumpPlane.slnx
-      - run: dotnet test PgDumpPlane.slnx -c Release --no-restore
+      - name: Test against PostgreSQL ${{ matrix.postgres }}
+        shell: bash
+        run: |
+          set +e
+          output=$(dotnet test PgDumpPlane.slnx -c Release --no-restore 2>&1)
+          status=$?
+          printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then
+            details=$(printf '%s' "$output" | tail -c 12000)
+            details=${details//'%'/'%25'}
+            details=${details//$'\r'/'%0D'}
+            details=${details//$'\n'/'%0A'}
+            echo "::error title=PostgreSQL ${{ matrix.postgres }} test failure::$details"
+            exit "$status"
+          fi
