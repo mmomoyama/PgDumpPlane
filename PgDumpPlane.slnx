@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/PgDumpPlane/PgDumpPlane.csproj" />
+  <Project Path="tests/PgDumpPlane.Tests/PgDumpPlane.Tests.csproj" />
+</Solution>
