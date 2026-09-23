@@ -168,11 +168,11 @@ public sealed class PostgresPlainTextDumper
 
     private static async Task WriteHeaderAsync(TextWriter writer, DatabaseInfo database, string? restrictKey)
     {
-        await writer.WriteAsync("--\n-- PostgreSQL database dump\n--\n\n").ConfigureAwait(false);
+        await writer.WriteAsync($"--\n{PgDumpFormat.HeaderTitle}\n--\n\n").ConfigureAwait(false);
         if (restrictKey is not null)
             await writer.WriteAsync($"\\restrict {restrictKey}\n\n").ConfigureAwait(false);
-        await writer.WriteAsync($"-- Dumped from database version {database.ServerVersion}\n").ConfigureAwait(false);
-        await writer.WriteAsync("-- Dumped by PgDumpPlane 0.1.0\n\n").ConfigureAwait(false);
+        await writer.WriteAsync($"{PgDumpFormat.SourceVersionPrefix}{database.ServerVersion}\n").ConfigureAwait(false);
+        await writer.WriteAsync($"{PgDumpFormat.ProducerVersionPrefix}{PgDumpFormat.ProducerVersion}\n\n").ConfigureAwait(false);
         await writer.WriteAsync("SET statement_timeout = 0;\nSET lock_timeout = 0;\nSET idle_in_transaction_session_timeout = 0;\n").ConfigureAwait(false);
         if (database.ServerMajorVersion >= 17)
             await writer.WriteAsync("SET transaction_timeout = 0;\n").ConfigureAwait(false);

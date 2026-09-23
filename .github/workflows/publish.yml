@@ -55,7 +55,7 @@ jobs:
           dotnet pack src/PgDumpPlane/PgDumpPlane.csproj \
             -c Release \
             --no-restore \
-            -p:PackageVersion="$package_version" \
+            -p:Version="$package_version" \
             -o artifacts
 
       - name: Save package artifact

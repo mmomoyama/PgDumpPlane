@@ -7,6 +7,39 @@ namespace PgDumpPlane;
 /// <summary>Restores a PgDumpPlane plain-text dump through Npgsql.</summary>
 public sealed class PostgresPlainTextRestorer
 {
+    /// <summary>Checks whether a file has a valid PgDumpPlane plain-text dump header.</summary>
+    public async Task<bool> IsValidDumpFileAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        await using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        using var reader = CreateReader(stream, leaveOpen: false);
+        try
+        {
+            _ = await PgDumpFormat.ReadAndValidateHeaderAsync(reader, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception exception) when (exception is InvalidDataException or DecoderFallbackException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Validates and restores a UTF-8 dump file into the specified database.</summary>
+    public async Task RestoreFileAsync(
+        string connectionString,
+        string path,
+        PgRestoreOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        await using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await RestoreAsync(connectionString, stream, options, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Restores a UTF-8 dump into the database identified by <paramref name="connectionString"/>.</summary>
     public async Task RestoreAsync(
         string connectionString,
@@ -78,14 +111,17 @@ public sealed class PostgresPlainTextRestorer
         PgRestoreOptions options,
         CancellationToken cancellationToken)
     {
-        using var reader = new StreamReader(
+        using var reader = CreateReader(source, options.LeaveOpen);
+        await RestoreCoreAsync(connection, reader, options, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static StreamReader CreateReader(Stream source, bool leaveOpen) =>
+        new(
             source,
             new UTF8Encoding(false, true),
             detectEncodingFromByteOrderMarks: true,
             bufferSize: 64 * 1024,
-            leaveOpen: options.LeaveOpen);
-        await RestoreCoreAsync(connection, reader, options, cancellationToken).ConfigureAwait(false);
-    }
+            leaveOpen: leaveOpen);
 
     private static async Task RestoreCoreAsync(
         NpgsqlConnection connection,
@@ -98,6 +134,9 @@ public sealed class PostgresPlainTextRestorer
         if (connection.Database is null)
             throw new InvalidOperationException("The connection must select a database.");
         _ = PostgresVersionCapabilities.Create(connection.PostgreSqlVersion);
+
+        // Validate before opening a transaction or executing any content from the file.
+        _ = await PgDumpFormat.ReadAndValidateHeaderAsync(source, cancellationToken).ConfigureAwait(false);
 
         await using var transaction = options.UseTransaction
             ? await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false)

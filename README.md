@@ -51,20 +51,26 @@ the default because it is smaller and generally restores faster.
 
 ## Restore
 
-Restore a dump through Npgsql with the library:
+Check a file and restore it through Npgsql with the library:
 
 ```csharp
-await using var input = File.OpenRead("database.sql");
+var restorer = new PostgresPlainTextRestorer();
 
-await new PostgresPlainTextRestorer().RestoreAsync(
+if (!await restorer.IsValidDumpFileAsync("database.sql"))
+    throw new InvalidDataException("Not a PgDumpPlane dump file.");
+
+await restorer.RestoreFileAsync(
     "Host=localhost;Database=app;Username=postgres;Password=secret",
-    input);
+    "database.sql");
 ```
 
 Both explicit-column `INSERT` statements and PostgreSQL text
 `COPY ... FROM stdin` blocks are supported. SQL statements and COPY rows are
 streamed instead of buffering the entire dump in memory. The restorer also
 understands the `\restrict`/`\unrestrict` guards emitted by this package.
+Every restore entry point validates the header before starting a transaction or
+executing SQL. Files produced by native `pg_dump`, arbitrary SQL files, and
+files without the PgDumpPlane producer header are rejected.
 
 By default, restore runs in one transaction so a failure rolls back the whole
 operation. This can be changed when a transaction is not appropriate:

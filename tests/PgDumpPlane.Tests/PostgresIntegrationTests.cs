@@ -6,6 +6,38 @@ namespace PgDumpPlane.Tests;
 public sealed class PostgresIntegrationTests
 {
     [Fact]
+    public async Task RestoreAsync_RejectsNonDumpBeforeExecutingSql()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("PGDUMPPLANE_TEST_CONNECTION");
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return;
+
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var schema = $"restore_invalid_{Guid.NewGuid():N}";
+        var qualifiedSchema = SqlText.Identifier(schema);
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        try
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                new PostgresPlainTextRestorer().RestoreAsync(
+                    connection,
+                    new StringReader($"CREATE SCHEMA {qualifiedSchema};"),
+                    cancellationToken: cancellationToken));
+
+            await using var verify = new NpgsqlCommand(
+                "SELECT pg_catalog.to_regnamespace(@schema) IS NULL", connection);
+            verify.Parameters.AddWithValue("schema", schema);
+            Assert.True((bool)(await verify.ExecuteScalarAsync(cancellationToken))!);
+        }
+        finally
+        {
+            await using var cleanup = new NpgsqlCommand($"DROP SCHEMA IF EXISTS {qualifiedSchema} CASCADE", connection);
+            await cleanup.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    [Fact]
     public async Task RestoreAsync_RollsBackTheWholeDumpOnFailure()
     {
         var connectionString = Environment.GetEnvironmentVariable("PGDUMPPLANE_TEST_CONNECTION");
@@ -19,7 +51,18 @@ public sealed class PostgresIntegrationTests
         await connection.OpenAsync(cancellationToken);
         try
         {
-            var script = $"CREATE SCHEMA {qualifiedSchema}; CREATE TABLE {qualifiedSchema}.item (id integer); SELECT 1 / 0;";
+            var script = $$"""
+                --
+                -- PostgreSQL database dump
+                --
+
+                -- Dumped from database version {{connection.PostgreSqlVersion}}
+                -- Dumped by PgDumpPlane test
+
+                CREATE SCHEMA {{qualifiedSchema}};
+                CREATE TABLE {{qualifiedSchema}}.item (id integer);
+                SELECT 1 / 0;
+                """;
 
             await Assert.ThrowsAsync<PostgresException>(() =>
                 new PostgresPlainTextRestorer().RestoreAsync(
@@ -150,6 +193,7 @@ public sealed class PostgresIntegrationTests
             Assert.Contains($"CREATE VIEW {qualifiedSchema}.\"parent_view\"", script);
             Assert.Contains("CREATE TRIGGER normalize_label", script);
             Assert.Contains("pg_catalog.setval", script);
+            Assert.Contains($"{PgDumpFormat.ProducerVersionPrefix}{PgDumpFormat.ProducerVersion}", script);
             Assert.Contains("\\restrict ", script);
             Assert.Contains("\\unrestrict ", script);
             Assert.Equal(serverMajor >= 17, script.Contains("SET transaction_timeout = 0;", StringComparison.Ordinal));
