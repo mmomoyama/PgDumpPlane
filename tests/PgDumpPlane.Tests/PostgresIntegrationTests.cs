@@ -6,6 +6,40 @@ namespace PgDumpPlane.Tests;
 public sealed class PostgresIntegrationTests
 {
     [Fact]
+    public async Task RestoreAsync_RollsBackTheWholeDumpOnFailure()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("PGDUMPPLANE_TEST_CONNECTION");
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return;
+
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var schema = $"restore_rollback_{Guid.NewGuid():N}";
+        var qualifiedSchema = SqlText.Identifier(schema);
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        try
+        {
+            var script = $"CREATE SCHEMA {qualifiedSchema}; CREATE TABLE {qualifiedSchema}.item (id integer); SELECT 1 / 0;";
+
+            await Assert.ThrowsAsync<PostgresException>(() =>
+                new PostgresPlainTextRestorer().RestoreAsync(
+                    connection,
+                    new StringReader(script),
+                    cancellationToken: cancellationToken));
+
+            await using var verify = new NpgsqlCommand(
+                "SELECT pg_catalog.to_regnamespace(@schema) IS NULL", connection);
+            verify.Parameters.AddWithValue("schema", schema);
+            Assert.True((bool)(await verify.ExecuteScalarAsync(cancellationToken))!);
+        }
+        finally
+        {
+            await using var cleanup = new NpgsqlCommand($"DROP SCHEMA IF EXISTS {qualifiedSchema} CASCADE", connection);
+            await cleanup.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    [Fact]
     public async Task DumpAsync_StreamsRestorableObjectKindsAndTableData()
     {
         var connectionString = Environment.GetEnvironmentVariable("PGDUMPPLANE_TEST_CONNECTION");
@@ -100,7 +134,7 @@ public sealed class PostgresIntegrationTests
                 await version18Setup.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            var options = new PgDumpOptions { UsePsqlRestrict = false };
+            var options = new PgDumpOptions();
             options.IncludeSchemas.Add(schema);
             await using var stream = new MemoryStream();
             await new PostgresPlainTextDumper().DumpAsync(connection, new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true), options, cancellationToken);
@@ -116,6 +150,8 @@ public sealed class PostgresIntegrationTests
             Assert.Contains($"CREATE VIEW {qualifiedSchema}.\"parent_view\"", script);
             Assert.Contains("CREATE TRIGGER normalize_label", script);
             Assert.Contains("pg_catalog.setval", script);
+            Assert.Contains("\\restrict ", script);
+            Assert.Contains("\\unrestrict ", script);
             Assert.Equal(serverMajor >= 17, script.Contains("SET transaction_timeout = 0;", StringComparison.Ordinal));
 
             if (serverMajor >= 14)
@@ -159,59 +195,57 @@ public sealed class PostgresIntegrationTests
                     insertScript);
             }
 
-            var copyHeader = $"COPY {qualifiedSchema}.\"binary_data\" (\"id\", \"payload\") FROM stdin;\n";
-            var copyStart = script.IndexOf(copyHeader, StringComparison.Ordinal);
-            Assert.True(copyStart >= 0, "The bytea COPY block was not written.");
-            copyStart += copyHeader.Length;
-            var copyEnd = script.IndexOf("\\.\n", copyStart, StringComparison.Ordinal);
-            Assert.True(copyEnd >= 0, "The bytea COPY block was not terminated.");
-            var copyRows = script[copyStart..copyEnd];
-
-            await using (var createCopyTarget = new NpgsqlCommand(
-                $"CREATE TABLE {qualifiedSchema}.binary_copy_restore (id integer PRIMARY KEY, payload bytea)", connection))
-            {
-                await createCopyTarget.ExecuteNonQueryAsync(cancellationToken);
-            }
-            await using (var copyWriter = await connection.BeginTextImportAsync(
-                $"COPY {qualifiedSchema}.binary_copy_restore (id, payload) FROM STDIN", cancellationToken))
-            {
-                await copyWriter.WriteAsync(copyRows);
-            }
-            await AssertBinaryRowsAsync(
-                connection,
-                $"{qualifiedSchema}.binary_copy_restore",
-                allByteValues,
-                largeBinary,
-                cancellationToken);
-
             await using (var dropSource = new NpgsqlCommand($"DROP SCHEMA {qualifiedSchema} CASCADE", connection))
                 await dropSource.ExecuteNonQueryAsync(cancellationToken);
-            await using (var restore = new NpgsqlCommand(insertScript, connection))
-                await restore.ExecuteNonQueryAsync(cancellationToken);
+            await using var copyRestoreStream = new MemoryStream(Encoding.UTF8.GetBytes(script));
+            await new PostgresPlainTextRestorer().RestoreAsync(
+                connectionString,
+                copyRestoreStream,
+                cancellationToken: cancellationToken);
+            await AssertRestoredDataAsync(
+                connection, qualifiedSchema, serverMajor, allByteValues, largeBinary, cancellationToken);
 
-            await using (var verify = new NpgsqlCommand(
-                $"SELECT label FROM {qualifiedSchema}.parent_first WHERE id = 1", connection))
-            {
-                Assert.Equal("hello\nworld", await verify.ExecuteScalarAsync(cancellationToken));
-            }
-            if (serverMajor >= 18)
-            {
-                await using var verifyGenerated = new NpgsqlCommand(
-                    $"SELECT doubled FROM {qualifiedSchema}.generated_feature WHERE source = 7", connection);
-                Assert.Equal(14, await verifyGenerated.ExecuteScalarAsync(cancellationToken));
-            }
-            await AssertBinaryRowsAsync(
+            await using (var dropCopyRestore = new NpgsqlCommand($"DROP SCHEMA {qualifiedSchema} CASCADE", connection))
+                await dropCopyRestore.ExecuteNonQueryAsync(cancellationToken);
+            await new PostgresPlainTextRestorer().RestoreAsync(
                 connection,
-                $"{qualifiedSchema}.binary_data",
-                allByteValues,
-                largeBinary,
-                cancellationToken);
+                new StringReader(insertScript),
+                cancellationToken: cancellationToken);
+            await AssertRestoredDataAsync(
+                connection, qualifiedSchema, serverMajor, allByteValues, largeBinary, cancellationToken);
         }
         finally
         {
             await using var cleanup = new NpgsqlCommand($"DROP SCHEMA IF EXISTS {qualifiedSchema} CASCADE", connection);
             await cleanup.ExecuteNonQueryAsync(cancellationToken);
         }
+    }
+
+    private static async Task AssertRestoredDataAsync(
+        NpgsqlConnection connection,
+        string qualifiedSchema,
+        int serverMajor,
+        byte[] allByteValues,
+        byte[] largeBinary,
+        CancellationToken cancellationToken)
+    {
+        await using (var verify = new NpgsqlCommand(
+            $"SELECT label FROM {qualifiedSchema}.parent_first WHERE id = 1", connection))
+        {
+            Assert.Equal("hello\nworld", await verify.ExecuteScalarAsync(cancellationToken));
+        }
+        if (serverMajor >= 18)
+        {
+            await using var verifyGenerated = new NpgsqlCommand(
+                $"SELECT doubled FROM {qualifiedSchema}.generated_feature WHERE source = 7", connection);
+            Assert.Equal(14, await verifyGenerated.ExecuteScalarAsync(cancellationToken));
+        }
+        await AssertBinaryRowsAsync(
+            connection,
+            $"{qualifiedSchema}.binary_data",
+            allByteValues,
+            largeBinary,
+            cancellationToken);
     }
 
     private static async Task AssertBinaryRowsAsync(

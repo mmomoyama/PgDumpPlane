@@ -49,15 +49,47 @@ var options = new PgDumpOptions
 INSERT rows are also streamed without buffering the whole table. COPY remains
 the default because it is smaller and generally restores faster.
 
-Restore with a current `psql` client:
+## Restore
+
+Restore a dump through Npgsql with the library:
+
+```csharp
+await using var input = File.OpenRead("database.sql");
+
+await new PostgresPlainTextRestorer().RestoreAsync(
+    "Host=localhost;Database=app;Username=postgres;Password=secret",
+    input);
+```
+
+Both explicit-column `INSERT` statements and PostgreSQL text
+`COPY ... FROM stdin` blocks are supported. SQL statements and COPY rows are
+streamed instead of buffering the entire dump in memory. The restorer also
+understands the `\restrict`/`\unrestrict` guards emitted by this package.
+
+By default, restore runs in one transaction so a failure rolls back the whole
+operation. This can be changed when a transaction is not appropriate:
+
+```csharp
+var options = new PgRestoreOptions
+{
+    UseTransaction = false,
+    CommandTimeout = 0
+};
+```
+
+Restore into an empty database, or into a database where the dumped objects do
+not already exist. A plain-text dump is executable SQL; only restore files from
+a trusted source.
+
+You can alternatively restore with a current `psql` client:
 
 ```shell
 psql --set ON_ERROR_STOP=on --dbname target --file database.sql
 ```
 
-Set `UsePsqlRestrict = false` when the output must be consumed as SQL by a
-client other than `psql`. The default emits the `\restrict`/`\unrestrict`
-guard used by current PostgreSQL releases.
+The default dump emits the `\restrict`/`\unrestrict` guard used by current
+PostgreSQL releases. Both this package's restorer and current `psql` clients
+understand the guard. Set `UsePsqlRestrict = false` for other SQL clients.
 
 ## Current scope
 
