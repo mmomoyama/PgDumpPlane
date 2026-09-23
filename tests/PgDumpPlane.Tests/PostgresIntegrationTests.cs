@@ -98,6 +98,7 @@ public sealed class PostgresIntegrationTests
         Assert.InRange(serverMajor, 12, 18);
         var allByteValues = Enumerable.Range(0, 256).Select(x => (byte)x).ToArray();
         var largeBinary = Enumerable.Range(0, 256 * 1024).Select(x => (byte)(x * 31)).ToArray();
+        string? alternateOwner = null;
         try
         {
             await using (var setup = new NpgsqlCommand($"""
@@ -122,6 +123,15 @@ public sealed class PostgresIntegrationTests
                     id integer PRIMARY KEY,
                     payload bytea
                 );
+                CREATE SEQUENCE {qualifiedSchema}.default_counter;
+                CREATE TABLE {qualifiedSchema}.sequence_default (
+                    id bigint DEFAULT nextval('{schema}.default_counter'::regclass)
+                );
+                ALTER SEQUENCE {qualifiedSchema}.default_counter
+                    OWNED BY {qualifiedSchema}.sequence_default.id;
+                GRANT SELECT ON TABLE {qualifiedSchema}.binary_data TO PUBLIC;
+                GRANT UPDATE (payload) ON TABLE {qualifiedSchema}.binary_data TO PUBLIC;
+                REVOKE EXECUTE ON FUNCTION {qualifiedSchema}.normalize_label() FROM PUBLIC;
                 """, connection))
             {
                 await setup.ExecuteNonQueryAsync(cancellationToken);
@@ -177,6 +187,22 @@ public sealed class PostgresIntegrationTests
                 await version18Setup.ExecuteNonQueryAsync(cancellationToken);
             }
 
+            await using (var roleCheck = new NpgsqlCommand(
+                "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user", connection))
+            {
+                if ((bool)(await roleCheck.ExecuteScalarAsync(cancellationToken))!)
+                {
+                    alternateOwner = $"dump_owner_{Guid.NewGuid():N}";
+                    var qualifiedOwner = SqlText.Identifier(alternateOwner);
+                    await using var ownerSetup = new NpgsqlCommand($"""
+                        CREATE ROLE {qualifiedOwner} NOLOGIN;
+                        GRANT CREATE ON SCHEMA {qualifiedSchema} TO {qualifiedOwner};
+                        ALTER TABLE {qualifiedSchema}.binary_data OWNER TO {qualifiedOwner};
+                        """, connection);
+                    await ownerSetup.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+
             var options = new PgDumpOptions();
             options.IncludeSchemas.Add(schema);
             await using var stream = new MemoryStream();
@@ -185,6 +211,7 @@ public sealed class PostgresIntegrationTests
 
             Assert.Contains($"CREATE TYPE {qualifiedSchema}.\"mood\" AS ENUM ('happy', 'sad');", script);
             Assert.Contains($"CREATE TABLE {qualifiedSchema}.\"parent\"", script);
+            Assert.Contains($"nextval('{schema}.default_counter'::regclass)", script);
             Assert.Contains($"CREATE TABLE {qualifiedSchema}.\"parent_first\" PARTITION OF", script);
             Assert.Contains($"COPY {qualifiedSchema}.\"parent_first\"", script);
             Assert.Contains("hello\\nworld", script);
@@ -193,6 +220,21 @@ public sealed class PostgresIntegrationTests
             Assert.Contains($"CREATE VIEW {qualifiedSchema}.\"parent_view\"", script);
             Assert.Contains("CREATE TRIGGER normalize_label", script);
             Assert.Contains("pg_catalog.setval", script);
+            Assert.Contains($"ALTER SCHEMA {qualifiedSchema} OWNER TO", script);
+            Assert.Contains($"ALTER TABLE {qualifiedSchema}.\"binary_data\" OWNER TO", script);
+            if (alternateOwner is not null)
+            {
+                Assert.Contains(
+                    $"ALTER TABLE {qualifiedSchema}.\"binary_data\" OWNER TO {SqlText.Identifier(alternateOwner)};",
+                    script);
+            }
+            Assert.Contains($"GRANT SELECT ON TABLE {qualifiedSchema}.\"binary_data\" TO PUBLIC;", script);
+            Assert.Contains(
+                $"GRANT UPDATE (\"payload\") ON TABLE {qualifiedSchema}.\"binary_data\" TO PUBLIC;",
+                script);
+            Assert.Contains(
+                $"REVOKE ALL PRIVILEGES ON FUNCTION {qualifiedSchema}.\"normalize_label\"() FROM PUBLIC;",
+                script);
             Assert.Contains($"{PgDumpFormat.ProducerVersionPrefix}{PgDumpFormat.ProducerVersion}", script);
             Assert.Contains("\\restrict ", script);
             Assert.Contains("\\unrestrict ", script);
@@ -248,6 +290,7 @@ public sealed class PostgresIntegrationTests
                 cancellationToken: cancellationToken);
             await AssertRestoredDataAsync(
                 connection, qualifiedSchema, serverMajor, allByteValues, largeBinary, cancellationToken);
+            await AssertRestoredSecurityAsync(connection, schema, alternateOwner, cancellationToken);
 
             await using (var dropCopyRestore = new NpgsqlCommand($"DROP SCHEMA {qualifiedSchema} CASCADE", connection))
                 await dropCopyRestore.ExecuteNonQueryAsync(cancellationToken);
@@ -257,10 +300,15 @@ public sealed class PostgresIntegrationTests
                 cancellationToken: cancellationToken);
             await AssertRestoredDataAsync(
                 connection, qualifiedSchema, serverMajor, allByteValues, largeBinary, cancellationToken);
+            await AssertRestoredSecurityAsync(connection, schema, alternateOwner, cancellationToken);
         }
         finally
         {
-            await using var cleanup = new NpgsqlCommand($"DROP SCHEMA IF EXISTS {qualifiedSchema} CASCADE", connection);
+            var dropRole = alternateOwner is null
+                ? string.Empty
+                : $"; DROP ROLE IF EXISTS {SqlText.Identifier(alternateOwner)}";
+            await using var cleanup = new NpgsqlCommand(
+                $"DROP SCHEMA IF EXISTS {qualifiedSchema} CASCADE{dropRole}", connection);
             await cleanup.ExecuteNonQueryAsync(cancellationToken);
         }
     }
@@ -290,6 +338,37 @@ public sealed class PostgresIntegrationTests
             allByteValues,
             largeBinary,
             cancellationToken);
+    }
+
+    private static async Task AssertRestoredSecurityAsync(
+        NpgsqlConnection connection,
+        string schema,
+        string? expectedTableOwner,
+        CancellationToken cancellationToken)
+    {
+        var table = $"{SqlText.Identifier(schema)}.\"binary_data\"";
+        var routine = $"{SqlText.Identifier(schema)}.\"normalize_label\"()";
+        await using var command = new NpgsqlCommand(
+            """
+            SELECT pg_catalog.has_table_privilege('public', @table, 'SELECT'),
+                   pg_catalog.has_column_privilege('public', @table, 'payload', 'UPDATE'),
+                   pg_catalog.has_function_privilege('public', @routine, 'EXECUTE'),
+                   (SELECT pg_catalog.pg_get_userbyid(c.relowner)
+                    FROM pg_catalog.pg_class c
+                    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = @schema AND c.relname = 'binary_data')
+            """,
+            connection);
+        command.Parameters.AddWithValue("table", table);
+        command.Parameters.AddWithValue("routine", routine);
+        command.Parameters.AddWithValue("schema", schema);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        Assert.True(await reader.ReadAsync(cancellationToken));
+        Assert.True(reader.GetBoolean(0));
+        Assert.True(reader.GetBoolean(1));
+        Assert.False(reader.GetBoolean(2));
+        if (expectedTableOwner is not null)
+            Assert.Equal(expectedTableOwner, reader.GetString(3));
     }
 
     private static async Task AssertBinaryRowsAsync(

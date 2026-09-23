@@ -26,8 +26,16 @@ internal static class CatalogReader
         var constraints = await ReadConstraintsAsync(connection, tableOids, cancellationToken).ConfigureAwait(false);
         var indexes = await ReadIndexesAsync(connection, tableOids, cancellationToken).ConfigureAwait(false);
         var triggers = await ReadTriggersAsync(connection, tableOids, capabilities, cancellationToken).ConfigureAwait(false);
+        var ownership = options.IncludeSchema && options.IncludeOwnership
+            ? await ReadOwnershipAsync(connection, selected, cancellationToken).ConfigureAwait(false)
+            : [];
+        var accessControls = options.IncludeSchema && options.IncludePrivileges
+            ? await ReadAccessControlsAsync(connection, selected, cancellationToken).ConfigureAwait(false)
+            : [];
 
-        return new(database, schemas, extensions, enums, routines, sequences, tables, views, constraints, indexes, triggers);
+        return new(
+            database, schemas, extensions, enums, routines, sequences, tables, views, constraints, indexes, triggers,
+            ownership, accessControls);
     }
 
     private static async Task<DatabaseInfo> ReadDatabaseAsync(
@@ -442,6 +450,162 @@ internal static class CatalogReader
                 result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3)));
         }
         return result;
+    }
+
+    private static async Task<IReadOnlyList<OwnershipInfo>> ReadOwnershipAsync(
+        NpgsqlConnection connection,
+        ISet<string> selected,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT 'Schema', n.nspname::text, n.nspname::text, NULL::text,
+                   pg_catalog.pg_get_userbyid(n.nspowner)::text
+            FROM pg_catalog.pg_namespace n
+            WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+            UNION ALL
+            SELECT 'Type', n.nspname::text, t.typname::text, NULL::text,
+                   pg_catalog.pg_get_userbyid(t.typowner)::text
+            FROM pg_catalog.pg_type t
+            JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+            WHERE t.typtype = 'e'
+              AND NOT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_depend d
+                WHERE d.classid = 'pg_catalog.pg_type'::pg_catalog.regclass
+                  AND d.objid = t.oid AND d.deptype = 'e')
+            UNION ALL
+            SELECT CASE p.prokind WHEN 'p' THEN 'Procedure' ELSE 'Function' END,
+                   n.nspname::text, p.proname::text,
+                   pg_catalog.pg_get_function_identity_arguments(p.oid),
+                   pg_catalog.pg_get_userbyid(p.proowner)::text
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.prokind IN ('f', 'p')
+              AND NOT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_depend d
+                WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+                  AND d.objid = p.oid AND d.deptype = 'e')
+            UNION ALL
+            SELECT CASE c.relkind WHEN 'S' THEN 'Sequence' WHEN 'v' THEN 'View' ELSE 'Table' END,
+                   n.nspname::text, c.relname::text, NULL::text,
+                   pg_catalog.pg_get_userbyid(c.relowner)::text
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r', 'p', 'S', 'v')
+              AND NOT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_depend d
+                WHERE d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                  AND d.objid = c.oid AND d.deptype = 'e')
+            ORDER BY 1, 2, 3, 4
+            """;
+        var result = new List<OwnershipInfo>();
+        await using var command = new NpgsqlCommand(sql, connection);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var kind = Enum.Parse<SecuredObjectKind>(reader.GetString(0));
+            var schema = GetNullableString(reader, 1);
+            if (schema is not null && !selected.Contains(schema))
+                continue;
+            result.Add(new(
+                kind, schema, reader.GetString(2), GetNullableString(reader, 3), reader.GetString(4)));
+        }
+        return result;
+    }
+
+    private static async Task<IReadOnlyList<AccessControlInfo>> ReadAccessControlsAsync(
+        NpgsqlConnection connection,
+        ISet<string> selected,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            WITH objects AS (
+                SELECT 'Schema'::text AS kind, n.nspname::text AS schema_name, n.nspname::text AS object_name,
+                       NULL::text AS identity_arguments, NULL::text AS column_name,
+                       n.nspowner AS owner_oid, n.nspacl AS acl
+                FROM pg_catalog.pg_namespace n
+                WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND n.nspacl IS NOT NULL
+                UNION ALL
+                SELECT 'Type', n.nspname::text, t.typname::text, NULL::text, NULL::text,
+                       t.typowner, t.typacl
+                FROM pg_catalog.pg_type t
+                JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+                WHERE t.typtype = 'e' AND t.typacl IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_depend d
+                    WHERE d.classid = 'pg_catalog.pg_type'::pg_catalog.regclass
+                      AND d.objid = t.oid AND d.deptype = 'e')
+                UNION ALL
+                SELECT CASE p.prokind WHEN 'p' THEN 'Procedure' ELSE 'Function' END,
+                       n.nspname::text, p.proname::text,
+                       pg_catalog.pg_get_function_identity_arguments(p.oid), NULL::text,
+                       p.proowner, p.proacl
+                FROM pg_catalog.pg_proc p
+                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+                WHERE p.prokind IN ('f', 'p') AND p.proacl IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_depend d
+                    WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+                      AND d.objid = p.oid AND d.deptype = 'e')
+                UNION ALL
+                SELECT CASE c.relkind WHEN 'S' THEN 'Sequence' WHEN 'v' THEN 'View' ELSE 'Table' END,
+                       n.nspname::text, c.relname::text, NULL::text, NULL::text,
+                       c.relowner, c.relacl
+                FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind IN ('r', 'p', 'S', 'v') AND c.relacl IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_depend d
+                    WHERE d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                      AND d.objid = c.oid AND d.deptype = 'e')
+                UNION ALL
+                SELECT 'Table', n.nspname::text, c.relname::text, NULL::text, a.attname::text,
+                       c.relowner, a.attacl
+                FROM pg_catalog.pg_attribute a
+                JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind IN ('r', 'p', 'v') AND a.attnum > 0 AND NOT a.attisdropped
+                  AND a.attacl IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_depend d
+                    WHERE d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                      AND d.objid = c.oid AND d.deptype = 'e')
+            )
+            SELECT o.kind, o.schema_name, o.object_name, o.identity_arguments, o.column_name,
+                   pg_catalog.pg_get_userbyid(o.owner_oid)::text,
+                   CASE WHEN acl.grantee = 0 THEN NULL ELSE pg_catalog.pg_get_userbyid(acl.grantee)::text END,
+                   acl.privilege_type, acl.is_grantable
+            FROM objects o
+            LEFT JOIN LATERAL pg_catalog.aclexplode(o.acl) acl ON true
+            ORDER BY o.kind, o.schema_name, o.object_name, o.identity_arguments, o.column_name,
+                     acl.grantee, acl.privilege_type
+            """;
+        var rows = new List<(SecuredObjectKind Kind, string? Schema, string Name, string? Arguments, string? Column,
+            string Owner, string? Grantee, string? Privilege, bool Grantable)>();
+        await using var command = new NpgsqlCommand(sql, connection);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var schema = GetNullableString(reader, 1);
+            if (schema is not null && !selected.Contains(schema))
+                continue;
+            rows.Add((
+                Enum.Parse<SecuredObjectKind>(reader.GetString(0)), schema, reader.GetString(2),
+                GetNullableString(reader, 3), GetNullableString(reader, 4), reader.GetString(5),
+                GetNullableString(reader, 6), GetNullableString(reader, 7),
+                !reader.IsDBNull(8) && reader.GetBoolean(8)));
+        }
+
+        return rows
+            .GroupBy(x => (x.Kind, x.Schema, x.Name, x.Arguments, x.Column, x.Owner))
+            .Select(group => new AccessControlInfo(
+                group.Key.Kind, group.Key.Schema, group.Key.Name, group.Key.Arguments, group.Key.Column,
+                group.Key.Owner,
+                group.Where(x => x.Privilege is not null)
+                    .GroupBy(x => (x.Grantee, x.Privilege))
+                    .Select(x => new PrivilegeInfo(
+                        x.Key.Grantee, x.Key.Privilege!, x.Any(entry => entry.Grantable)))
+                    .ToArray()))
+            .ToArray();
     }
 
     private static string? GetNullableString(NpgsqlDataReader reader, int ordinal) =>

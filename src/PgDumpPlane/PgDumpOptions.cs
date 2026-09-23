@@ -37,6 +37,12 @@ public sealed class PgDumpOptions
     /// <summary>Emit psql's \restrict guard, as current pg_dump versions do.</summary>
     public bool UsePsqlRestrict { get; set; } = true;
 
+    /// <summary>Write ownership for supported database objects. Defaults to <see langword="true"/>.</summary>
+    public bool IncludeOwnership { get; set; } = true;
+
+    /// <summary>Write explicit object and column access privileges. Defaults to <see langword="true"/>.</summary>
+    public bool IncludePrivileges { get; set; } = true;
+
     /// <summary>Leave the supplied stream or writer open after dumping.</summary>
     public bool LeaveOpen { get; set; } = true;
 

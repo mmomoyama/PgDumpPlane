@@ -126,7 +126,10 @@ public sealed class PostgresPlainTextDumper
             }
 
             if (options.IncludeSchema)
+            {
                 await WritePostDataAsync(writer, snapshot).ConfigureAwait(false);
+                await WriteSecurityAsync(writer, snapshot).ConfigureAwait(false);
+            }
 
             if (restrictKey is not null)
                 await writer.WriteAsync($"\\unrestrict {restrictKey}\n\n").ConfigureAwait(false);
@@ -154,6 +157,7 @@ public sealed class PostgresPlainTextDumper
             SET extra_float_digits = 3;
             SET synchronize_seqscans = off;
             SET row_security = off;
+            SELECT pg_catalog.set_config('search_path', '', false);
             """;
         if (capabilities.SupportsTransactionTimeout)
             sql += "\nSET transaction_timeout = 0;";
@@ -431,6 +435,107 @@ public sealed class PostgresPlainTextDumper
         foreach (var trigger in snapshot.Triggers)
             await writer.WriteAsync($"{trigger.Definition};\n\n").ConfigureAwait(false);
     }
+
+    internal static async Task WriteSecurityAsync(TextWriter writer, CatalogSnapshot snapshot)
+    {
+        if (snapshot.AccessControls.Count == 0 && snapshot.Ownership.Count == 0)
+            return;
+
+        await SectionAsync(writer, "OWNERSHIP AND PRIVILEGES").ConfigureAwait(false);
+
+        // A table-level REVOKE also removes column privileges, so table ACLs must
+        // be reset before any column ACLs are reconstructed.
+        foreach (var accessControl in snapshot.AccessControls.OrderBy(x => x.Column is null ? 0 : 1))
+            await WriteAccessControlAsync(writer, accessControl).ConfigureAwait(false);
+
+        // Transfer contained objects first. Changing a schema owner earlier can remove
+        // permissions needed to finish transferring the objects inside it.
+        foreach (var ownership in snapshot.Ownership.OrderBy(x => OwnershipOrder(x.Kind)))
+        {
+            var identity = SecurityObjectIdentity(
+                ownership.Kind, ownership.Schema, ownership.Name, ownership.IdentityArguments);
+            await writer.WriteAsync(
+                $"ALTER {OwnershipKeyword(ownership.Kind)} {identity} OWNER TO {SqlText.Identifier(ownership.Owner)};\n")
+                .ConfigureAwait(false);
+        }
+        await writer.WriteAsync('\n').ConfigureAwait(false);
+    }
+
+    private static async Task WriteAccessControlAsync(TextWriter writer, AccessControlInfo accessControl)
+    {
+        var keyword = PrivilegeKeyword(accessControl.Kind);
+        var identity = SecurityObjectIdentity(
+            accessControl.Kind, accessControl.Schema, accessControl.Name, accessControl.IdentityArguments);
+        var column = accessControl.Column is null
+            ? string.Empty
+            : $" ({SqlText.Identifier(accessControl.Column)})";
+
+        await writer.WriteAsync(
+            $"REVOKE ALL PRIVILEGES{column} ON {keyword} {identity} FROM CURRENT_USER;\n")
+            .ConfigureAwait(false);
+        var grantees = accessControl.Privileges
+            .Select(x => x.Grantee)
+            .Append(null)
+            .Append(accessControl.Owner)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        foreach (var grantee in grantees)
+        {
+            var role = grantee is null ? "PUBLIC" : SqlText.Identifier(grantee);
+            await writer.WriteAsync(
+                $"REVOKE ALL PRIVILEGES{column} ON {keyword} {identity} FROM {role};\n")
+                .ConfigureAwait(false);
+        }
+
+        foreach (var privilege in accessControl.Privileges)
+        {
+            var role = privilege.Grantee is null ? "PUBLIC" : SqlText.Identifier(privilege.Grantee);
+            var grantOption = privilege.IsGrantable ? " WITH GRANT OPTION" : string.Empty;
+            await writer.WriteAsync(
+                $"GRANT {privilege.Privilege}{column} ON {keyword} {identity} TO {role}{grantOption};\n")
+                .ConfigureAwait(false);
+        }
+        await writer.WriteAsync('\n').ConfigureAwait(false);
+    }
+
+    private static string SecurityObjectIdentity(
+        SecuredObjectKind kind,
+        string? schema,
+        string name,
+        string? identityArguments)
+    {
+        if (kind == SecuredObjectKind.Schema)
+            return SqlText.Identifier(name);
+
+        var qualified = SqlText.Qualified(schema!, name);
+        return kind is SecuredObjectKind.Function or SecuredObjectKind.Procedure
+            ? $"{qualified}({identityArguments})"
+            : qualified;
+    }
+
+    private static string OwnershipKeyword(SecuredObjectKind kind) => kind switch
+    {
+        SecuredObjectKind.Schema => "SCHEMA",
+        SecuredObjectKind.Type => "TYPE",
+        SecuredObjectKind.Function => "FUNCTION",
+        SecuredObjectKind.Procedure => "PROCEDURE",
+        SecuredObjectKind.Table => "TABLE",
+        SecuredObjectKind.Sequence => "SEQUENCE",
+        SecuredObjectKind.View => "VIEW",
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported secured object kind.")
+    };
+
+    private static string PrivilegeKeyword(SecuredObjectKind kind) => kind switch
+    {
+        SecuredObjectKind.View => "TABLE",
+        _ => OwnershipKeyword(kind)
+    };
+
+    private static int OwnershipOrder(SecuredObjectKind kind) => kind switch
+    {
+        SecuredObjectKind.Schema => 1,
+        _ => 0
+    };
 
     private static Task SectionAsync(TextWriter writer, string name) =>
         writer.WriteAsync($"--\n-- {name}\n--\n\n");

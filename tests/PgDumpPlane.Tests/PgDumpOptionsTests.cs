@@ -5,7 +5,11 @@ public sealed class PgDumpOptionsTests
     [Fact]
     public void DataFormat_DefaultsToCopy()
     {
-        Assert.Equal(PgDumpDataFormat.Copy, new PgDumpOptions().DataFormat);
+        var options = new PgDumpOptions();
+
+        Assert.Equal(PgDumpDataFormat.Copy, options.DataFormat);
+        Assert.True(options.IncludeOwnership);
+        Assert.True(options.IncludePrivileges);
     }
 
     [Fact]

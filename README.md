@@ -107,7 +107,20 @@ The package supports PostgreSQL 12 through 18 and writes:
 - sequences, ownership, and current sequence state;
 - table rows in PostgreSQL text `COPY` format or explicit-column `INSERT` statements;
 - primary, unique, check, exclusion, and foreign-key constraints;
-- standalone indexes, views, and triggers.
+- standalone indexes, views, and triggers;
+- ownership and explicit object or column privileges for schemas, enum types,
+  routines, tables, views, and sequences.
+
+Roles are cluster-wide objects and are not created by a database dump. Every
+owner and grantee referenced by a dump must already exist on the destination
+server. Set `IncludeOwnership` or `IncludePrivileges` to `false` when those
+settings should not be restored. PostgreSQL does not provide an `ALTER
+EXTENSION ... OWNER TO` command, so extensions are owned by the user that runs
+the restore.
+
+As with `pg_dump` without `--create`, database-level ownership and privileges
+are not written. A database created by the WinForms sample is owned by the
+connection user.
 
 Version-specific catalog and SQL differences are selected from the connected
 server's major version:
@@ -127,8 +140,8 @@ instead of risking an invalid dump. CI runs the integration test against every
 PostgreSQL major version from 12 through 18.
 
 This is not yet a byte-for-byte or feature-complete replacement for native
-`pg_dump`. Version 0.1 does not dump ownership/ACLs, comments, domains,
-standalone composite types, foreign tables, materialized views, large objects,
+`pg_dump`. Version 0.1 does not dump comments, domains, standalone composite
+types, foreign tables, materialized views, large objects,
 row-security policies, publications/subscriptions, statistics objects, or
 security labels. For those objects, or for cross-major-version migrations,
 use the native `pg_dump` tool.
@@ -138,6 +151,24 @@ use the native `pg_dump` tool.
 ```shell
 dotnet test PgDumpPlane.slnx
 dotnet pack src/PgDumpPlane/PgDumpPlane.csproj -c Release -o artifacts
+```
+
+## WinForms sample
+
+`samples/PgDumpPlane.WinForms` contains a Windows desktop application for
+creating and restoring dump files. Enter the PostgreSQL host, credentials,
+database, and file path, then select the dump or restore operation.
+
+The restore operation validates the dump first, disconnects users from the
+target database, drops and recreates that database, and then restores the dump.
+It permanently removes the target database's existing contents and therefore
+shows a confirmation dialog before proceeding. The PostgreSQL user must have
+permission to terminate connections and create or drop the target database.
+
+Run the sample on Windows with:
+
+```shell
+dotnet run --project samples/PgDumpPlane.WinForms
 ```
 
 ## PostgreSQL attribution

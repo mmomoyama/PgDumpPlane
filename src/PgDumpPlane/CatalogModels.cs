@@ -55,6 +55,35 @@ internal sealed record ConstraintInfo(string Schema, string Table, string Name, 
 internal sealed record IndexInfo(string Schema, string Table, string Name, string Definition, bool Clustered, bool ReplicaIdentity);
 internal sealed record TriggerInfo(string Schema, string Table, string Name, string Definition);
 
+internal enum SecuredObjectKind
+{
+    Schema,
+    Type,
+    Function,
+    Procedure,
+    Table,
+    Sequence,
+    View
+}
+
+internal sealed record OwnershipInfo(
+    SecuredObjectKind Kind,
+    string? Schema,
+    string Name,
+    string? IdentityArguments,
+    string Owner);
+
+internal sealed record PrivilegeInfo(string? Grantee, string Privilege, bool IsGrantable);
+
+internal sealed record AccessControlInfo(
+    SecuredObjectKind Kind,
+    string? Schema,
+    string Name,
+    string? IdentityArguments,
+    string? Column,
+    string Owner,
+    IReadOnlyList<PrivilegeInfo> Privileges);
+
 internal sealed record CatalogSnapshot(
     DatabaseInfo Database,
     IReadOnlyList<SchemaInfo> Schemas,
@@ -66,4 +95,6 @@ internal sealed record CatalogSnapshot(
     IReadOnlyList<ViewInfo> Views,
     IReadOnlyList<ConstraintInfo> Constraints,
     IReadOnlyList<IndexInfo> Indexes,
-    IReadOnlyList<TriggerInfo> Triggers);
+    IReadOnlyList<TriggerInfo> Triggers,
+    IReadOnlyList<OwnershipInfo> Ownership,
+    IReadOnlyList<AccessControlInfo> AccessControls);
