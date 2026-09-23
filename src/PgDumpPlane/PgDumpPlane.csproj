@@ -4,10 +4,10 @@
     <AssemblyName>PgDumpPlane</AssemblyName>
     <RootNamespace>PgDumpPlane</RootNamespace>
     <PackageId>PgDumpPlane</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>mmomoyama</Authors>
-    <Description>Streams a PostgreSQL database as a pg_dump-style plain-text SQL script using Npgsql.</Description>
-    <PackageTags>postgresql;pg_dump;backup;npgsql;sql</PackageTags>
+    <Description>Streams and restores PostgreSQL databases as pg_dump-style plain-text SQL scripts using Npgsql.</Description>
+    <PackageTags>postgresql;pg_dump;backup;restore;npgsql;sql</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://github.com/mmomoyama/PgDumpPlane</PackageProjectUrl>

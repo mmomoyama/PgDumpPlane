@@ -1,8 +1,8 @@
 # PgDumpPlane
 
-`PgDumpPlane` is a .NET library that writes a PostgreSQL database as a
-`pg_dump`-style plain-text SQL script. It uses Npgsql only; it does not start
-the native `pg_dump` executable.
+`PgDumpPlane` is a .NET library that writes and restores PostgreSQL databases
+as `pg_dump`-style plain-text SQL scripts. It uses Npgsql only; it does not
+start the native `pg_dump` or `psql` executable.
 
 The implementation follows the important ordering and consistency rules in
 PostgreSQL's `src/bin/pg_dump`: catalog and data reads share a read-only
@@ -104,7 +104,7 @@ The package supports PostgreSQL 12 through 18 and writes:
 - user schemas and extensions;
 - enum types and routines;
 - ordinary, unlogged, and partitioned tables;
-- sequences, ownership, and current sequence state;
+- sequences, sequence-to-column ownership, and current sequence state;
 - table rows in PostgreSQL text `COPY` format or explicit-column `INSERT` statements;
 - primary, unique, check, exclusion, and foreign-key constraints;
 - standalone indexes, views, and triggers;
@@ -140,7 +140,7 @@ instead of risking an invalid dump. CI runs the integration test against every
 PostgreSQL major version from 12 through 18.
 
 This is not yet a byte-for-byte or feature-complete replacement for native
-`pg_dump`. Version 0.1 does not dump comments, domains, standalone composite
+`pg_dump`. Version 0.2 does not dump comments, domains, standalone composite
 types, foreign tables, materialized views, large objects,
 row-security policies, publications/subscriptions, statistics objects, or
 security labels. For those objects, or for cross-major-version migrations,
