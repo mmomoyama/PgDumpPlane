@@ -12,6 +12,8 @@ are written after table data.
 
 ## Install
 
+PgDumpPlane requires .NET 10 or later.
+
 ```shell
 dotnet add package PgDumpPlane
 ```
