@@ -212,7 +212,7 @@ internal sealed class MainForm : Form
     {
         using var dialog = new OpenFileDialog
         {
-            Filter = "SQL ファイル (*.sql)|*.sql|すべてのファイル (*.*)|*.*",
+            Filter = "SQL / ダンプファイル (*.sql;*.dmp)|*.sql;*.dmp|すべてのファイル (*.*)|*.*",
             CheckFileExists = true
         };
         if (dialog.ShowDialog(this) == DialogResult.OK)
@@ -288,7 +288,7 @@ internal sealed class MainForm : Form
             var restorer = new PostgresPlainTextRestorer();
             if (!await restorer.IsValidDumpFileAsync(path, _operationCancellation.Token))
             {
-                ShowError("PgDumpPlane で作成された有効なダンプファイルではありません。");
+                ShowError("PgDumpPlane または pg_dump で作成された有効なプレーンSQLダンプではありません。");
                 return;
             }
         }

@@ -2,13 +2,23 @@ using System.Reflection;
 
 namespace PgDumpPlane;
 
-internal sealed record PgDumpHeader(string SourceDatabaseVersion, string PgDumpPlaneVersion);
+internal enum PgDumpProducer
+{
+    PgDumpPlane,
+    PgDump
+}
+
+internal sealed record PgDumpHeader(
+    string SourceDatabaseVersion,
+    PgDumpProducer Producer,
+    string ProducerVersion);
 
 internal static class PgDumpFormat
 {
     internal const string HeaderTitle = "-- PostgreSQL database dump";
     internal const string SourceVersionPrefix = "-- Dumped from database version ";
     internal const string ProducerVersionPrefix = "-- Dumped by PgDumpPlane ";
+    internal const string NativeProducerVersionPrefix = "-- Dumped by pg_dump version ";
 
     internal static string ProducerVersion
     {
@@ -40,7 +50,7 @@ internal static class PgDumpFormat
         {
             var line = await source.ReadLineAsync(cancellationToken).ConfigureAwait(false);
             if (line is null)
-                throw Invalid("the PgDumpPlane producer header is missing");
+                throw Invalid("the producer header is missing");
             if (string.IsNullOrWhiteSpace(line) || line.StartsWith("\\restrict ", StringComparison.Ordinal))
                 continue;
             if (line.StartsWith(SourceVersionPrefix, StringComparison.Ordinal))
@@ -57,15 +67,24 @@ internal static class PgDumpFormat
                     throw Invalid("the PgDumpPlane version is empty");
                 if (sourceVersion is null)
                     throw Invalid("the source database version header is missing");
-                return new(sourceVersion, producerVersion);
+                return new(sourceVersion, PgDumpProducer.PgDumpPlane, producerVersion);
+            }
+            if (line.StartsWith(NativeProducerVersionPrefix, StringComparison.Ordinal))
+            {
+                var producerVersion = line[NativeProducerVersionPrefix.Length..].Trim();
+                if (producerVersion.Length == 0)
+                    throw Invalid("the pg_dump version is empty");
+                if (sourceVersion is null)
+                    throw Invalid("the source database version header is missing");
+                return new(sourceVersion, PgDumpProducer.PgDump, producerVersion);
             }
 
             throw Invalid($"unexpected content before the producer header: {line}");
         }
 
-        throw Invalid("the PgDumpPlane producer header is missing");
+        throw Invalid("the producer header is missing");
     }
 
     private static InvalidDataException Invalid(string reason) =>
-        new($"The input is not a PgDumpPlane plain-text dump: {reason}.");
+        new($"The input is not a supported PostgreSQL plain-text dump: {reason}.");
 }

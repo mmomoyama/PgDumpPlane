@@ -4,10 +4,10 @@ using Npgsql;
 
 namespace PgDumpPlane;
 
-/// <summary>Restores a PgDumpPlane plain-text dump through Npgsql.</summary>
+/// <summary>Restores a PgDumpPlane or native pg_dump plain-text dump through Npgsql.</summary>
 public sealed class PostgresPlainTextRestorer
 {
-    /// <summary>Checks whether a file has a valid PgDumpPlane plain-text dump header.</summary>
+    /// <summary>Checks whether a file has a supported PostgreSQL plain-text dump header.</summary>
     public async Task<bool> IsValidDumpFileAsync(
         string path,
         CancellationToken cancellationToken = default)

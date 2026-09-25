@@ -6,6 +6,49 @@ namespace PgDumpPlane.Tests;
 public sealed class PostgresIntegrationTests
 {
     [Fact]
+    public async Task RestoreAsync_AcceptsNativePgDumpPlainTextHeader()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("PGDUMPPLANE_TEST_CONNECTION");
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return;
+
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var schema = $"restore_native_{Guid.NewGuid():N}";
+        var qualifiedSchema = SqlText.Identifier(schema);
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        try
+        {
+            var script = $$"""
+                --
+                -- PostgreSQL database dump
+                --
+
+                -- Dumped from database version {{connection.PostgreSqlVersion}}
+                -- Dumped by pg_dump version {{connection.PostgreSqlVersion}}
+
+                CREATE SCHEMA {{qualifiedSchema}};
+                CREATE TABLE {{qualifiedSchema}}.item (id integer);
+                INSERT INTO {{qualifiedSchema}}.item VALUES (42);
+                """;
+
+            await new PostgresPlainTextRestorer().RestoreAsync(
+                connection,
+                new StringReader(script),
+                cancellationToken: cancellationToken);
+
+            await using var verify = new NpgsqlCommand(
+                $"SELECT id FROM {qualifiedSchema}.item", connection);
+            Assert.Equal(42, await verify.ExecuteScalarAsync(cancellationToken));
+        }
+        finally
+        {
+            await using var cleanup = new NpgsqlCommand($"DROP SCHEMA IF EXISTS {qualifiedSchema} CASCADE", connection);
+            await cleanup.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    [Fact]
     public async Task RestoreAsync_RejectsNonDumpBeforeExecutingSql()
     {
         var connectionString = Environment.GetEnvironmentVariable("PGDUMPPLANE_TEST_CONNECTION");

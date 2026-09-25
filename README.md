@@ -69,8 +69,10 @@ Both explicit-column `INSERT` statements and PostgreSQL text
 streamed instead of buffering the entire dump in memory. The restorer also
 understands the `\restrict`/`\unrestrict` guards emitted by this package.
 Every restore entry point validates the header before starting a transaction or
-executing SQL. Files produced by native `pg_dump`, arbitrary SQL files, and
-files without the PgDumpPlane producer header are rejected.
+executing SQL. Plain-text files produced by PgDumpPlane and native `pg_dump`
+are accepted. Arbitrary SQL files and the custom, directory, or tar archive
+formats produced by `pg_dump` are rejected; use `pg_restore` for those archive
+formats.
 
 By default, restore runs in one transaction so a failure rolls back the whole
 operation. This can be changed when a transaction is not appropriate:
