@@ -192,7 +192,7 @@ public sealed class PostgresPlainTextDumper
 
         foreach (var extension in snapshot.Extensions)
         {
-            await writer.WriteAsync($"CREATE EXTENSION IF NOT EXISTS {SqlText.Identifier(extension.Name)} WITH SCHEMA {SqlText.Identifier(extension.Schema)} VERSION {SqlText.Literal(extension.Version)};\n\n").ConfigureAwait(false);
+            await writer.WriteAsync($"CREATE EXTENSION IF NOT EXISTS {SqlText.Identifier(extension.Name)} WITH SCHEMA {SqlText.Identifier(extension.Schema)};\n\n").ConfigureAwait(false);
         }
 
         foreach (var item in snapshot.Enums)

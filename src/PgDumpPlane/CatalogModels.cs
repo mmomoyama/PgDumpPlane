@@ -2,7 +2,7 @@ namespace PgDumpPlane;
 
 internal sealed record DatabaseInfo(string Name, string ServerVersion, int ServerMajorVersion);
 internal sealed record SchemaInfo(string Name);
-internal sealed record ExtensionInfo(string Name, string Schema, string Version);
+internal sealed record ExtensionInfo(string Name, string Schema);
 internal sealed record EnumTypeInfo(string Schema, string Name, IReadOnlyList<string> Labels);
 internal sealed record RoutineInfo(string Schema, string Name, string Definition);
 

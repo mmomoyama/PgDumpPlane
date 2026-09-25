@@ -80,7 +80,7 @@ internal static class CatalogReader
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT e.extname, n.nspname, e.extversion
+            SELECT e.extname, n.nspname
             FROM pg_catalog.pg_extension e
             JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
             WHERE e.extname <> 'plpgsql'
@@ -92,7 +92,7 @@ internal static class CatalogReader
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             if (selected.Contains(reader.GetString(1)))
-                result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+                result.Add(new(reader.GetString(0), reader.GetString(1)));
         }
         return result;
     }

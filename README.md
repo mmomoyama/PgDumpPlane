@@ -113,12 +113,20 @@ The package supports PostgreSQL 12 through 18 and writes:
 - ownership and explicit object or column privileges for schemas, enum types,
   routines, tables, views, and sequences.
 
+Extension statements omit an explicit `VERSION`, so the destination server
+installs its default available version. For example, pgcrypto is written as
+`CREATE EXTENSION IF NOT EXISTS "pgcrypto" WITH SCHEMA "public";`.
+
 Roles are cluster-wide objects and are not created by a database dump. Every
 owner and grantee referenced by a dump must already exist on the destination
 server. Set `IncludeOwnership` or `IncludePrivileges` to `false` when those
 settings should not be restored. PostgreSQL does not provide an `ALTER
 EXTENSION ... OWNER TO` command, so extensions are owned by the user that runs
 the restore.
+
+Ownership is enabled by default. It is restored with statements such as
+`ALTER SCHEMA "app" OWNER TO "postgres";` and `ALTER FUNCTION
+"app"."calculate"() OWNER TO "postgres";`.
 
 As with `pg_dump` without `--create`, database-level ownership and privileges
 are not written. A database created by the WinForms sample is owned by the
@@ -160,6 +168,11 @@ dotnet pack src/PgDumpPlane/PgDumpPlane.csproj -c Release -o artifacts
 `samples/PgDumpPlane.WinForms` contains a Windows desktop application for
 creating and restoring dump files. Enter the PostgreSQL host, credentials,
 database, and file path, then select the dump or restore operation.
+
+The dump tab exposes schema filters, schema/data selection, COPY or INSERT
+format, unlogged-table data, ownership, privileges, snapshot mode, and the
+`psql` restrict guard. The restore tab exposes transaction handling and command
+timeout settings.
 
 The restore operation validates the dump first, disconnects users from the
 target database, drops and recreates that database, and then restores the dump.

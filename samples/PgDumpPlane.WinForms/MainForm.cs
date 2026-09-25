@@ -13,10 +13,22 @@ internal sealed class MainForm : Form
 
     private readonly TextBox _dumpDatabaseTextBox = new();
     private readonly TextBox _dumpPathTextBox = new();
+    private readonly TextBox _includeSchemasTextBox = new() { PlaceholderText = "例: public, sales（空欄はすべて）" };
+    private readonly TextBox _excludeSchemasTextBox = new() { PlaceholderText = "例: audit, work" };
+    private readonly CheckBox _includeSchemaCheckBox = new() { Text = "スキーマ定義を含める", Checked = true, AutoSize = true };
+    private readonly CheckBox _includeDataCheckBox = new() { Text = "テーブルデータとシーケンス値を含める", Checked = true, AutoSize = true };
+    private readonly ComboBox _dataFormatComboBox = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly CheckBox _includeUnloggedDataCheckBox = new() { Text = "UNLOGGEDテーブルのデータを含める", Checked = true, AutoSize = true };
+    private readonly CheckBox _serializableDeferrableCheckBox = new() { Text = "SERIALIZABLE / DEFERRABLEスナップショットを使用", AutoSize = true };
+    private readonly CheckBox _usePsqlRestrictCheckBox = new() { Text = "psqlの \\restrictガードを出力", Checked = true, AutoSize = true };
+    private readonly CheckBox _includeOwnershipCheckBox = new() { Text = "所有者を含める", Checked = true, AutoSize = true };
+    private readonly CheckBox _includePrivilegesCheckBox = new() { Text = "権限を含める", Checked = true, AutoSize = true };
     private readonly Button _dumpButton = new() { Text = "ダンプを作成", AutoSize = true };
 
     private readonly TextBox _restoreDatabaseTextBox = new();
     private readonly TextBox _restorePathTextBox = new();
+    private readonly CheckBox _useTransactionCheckBox = new() { Text = "単一トランザクションでリストア", Checked = true, AutoSize = true };
+    private readonly NumericUpDown _commandTimeoutInput = new() { Minimum = 0, Maximum = 86400, Value = 0 };
     private readonly Button _restoreButton = new() { Text = "DBを削除してリストア", AutoSize = true };
 
     private readonly Button _cancelButton = new() { Text = "キャンセル", AutoSize = true, Enabled = false };
@@ -28,13 +40,15 @@ internal sealed class MainForm : Form
     {
         Text = "PgDumpPlane Backup & Restore";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(700, 600);
-        Size = new Size(760, 650);
+        MinimumSize = new Size(760, 680);
+        Size = new Size(840, 800);
         AutoScaleMode = AutoScaleMode.Dpi;
         Font = new Font("Yu Gothic UI", 9F);
 
         _sslModeComboBox.Items.AddRange([SslMode.Prefer, SslMode.Require, SslMode.Disable]);
         _sslModeComboBox.SelectedItem = SslMode.Prefer;
+        _dataFormatComboBox.Items.AddRange([PgDumpDataFormat.Copy, PgDumpDataFormat.Inserts]);
+        _dataFormatComboBox.SelectedItem = PgDumpDataFormat.Copy;
 
         var root = new TableLayoutPanel
         {
@@ -95,10 +109,11 @@ internal sealed class MainForm : Form
 
     private TabPage CreateDumpTab()
     {
-        var page = new TabPage("ダンプ") { Padding = new Padding(12) };
+        var page = new TabPage("ダンプ") { Padding = new Padding(12), AutoScroll = true };
         var layout = CreateFormLayout();
         AddRow(layout, "対象DB", _dumpDatabaseTextBox);
         AddPathRow(layout, "保存先", _dumpPathTextBox, SelectDumpPath);
+        AddRow(layout, "オプション", CreateDumpOptionsPanel());
         var note = new Label
         {
             Text = "指定したデータベースを PgDumpPlane 形式の SQL ファイルへ保存します。",
@@ -115,10 +130,11 @@ internal sealed class MainForm : Form
 
     private TabPage CreateRestoreTab()
     {
-        var page = new TabPage("リストア") { Padding = new Padding(12) };
+        var page = new TabPage("リストア") { Padding = new Padding(12), AutoScroll = true };
         var layout = CreateFormLayout();
         AddRow(layout, "対象DB", _restoreDatabaseTextBox);
         AddPathRow(layout, "ダンプファイル", _restorePathTextBox, SelectRestorePath);
+        AddRow(layout, "オプション", CreateRestoreOptionsPanel());
         var warning = new Label
         {
             Text = "警告: 対象DBへの接続を切断し、DBを削除して新規作成した後にリストアします。",
@@ -132,6 +148,62 @@ internal sealed class MainForm : Form
         layout.RowCount++;
         page.Controls.Add(layout);
         return page;
+    }
+
+    private Control CreateDumpOptionsPanel()
+    {
+        var layout = CreateFormLayout();
+        layout.ColumnStyles[0].Width = 150;
+        AddRow(layout, "対象スキーマ", _includeSchemasTextBox);
+        AddRow(layout, "除外スキーマ", _excludeSchemasTextBox);
+        AddRow(layout, "データ形式", _dataFormatComboBox);
+        AddRow(layout, "出力内容", CreateVerticalOptionsPanel(
+            _includeSchemaCheckBox,
+            _includeDataCheckBox,
+            _includeUnloggedDataCheckBox,
+            _includeOwnershipCheckBox,
+            _includePrivilegesCheckBox,
+            _serializableDeferrableCheckBox,
+            _usePsqlRestrictCheckBox));
+        return layout;
+    }
+
+    private Control CreateRestoreOptionsPanel()
+    {
+        var layout = CreateFormLayout();
+        layout.ColumnStyles[0].Width = 150;
+        AddRow(layout, "実行方法", _useTransactionCheckBox);
+
+        var timeoutPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Dock = DockStyle.Fill
+        };
+        _commandTimeoutInput.Width = 100;
+        timeoutPanel.Controls.Add(_commandTimeoutInput);
+        timeoutPanel.Controls.Add(new Label
+        {
+            Text = "秒（0は無制限）",
+            AutoSize = true,
+            Margin = new Padding(3, 8, 3, 3)
+        });
+        AddRow(layout, "タイムアウト", timeoutPanel);
+        return layout;
+    }
+
+    private static Control CreateVerticalOptionsPanel(params Control[] controls)
+    {
+        var panel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            Dock = DockStyle.Fill
+        };
+        panel.Controls.AddRange(controls);
+        return panel;
     }
 
     private Control CreateStatusPanel()
@@ -225,9 +297,16 @@ internal sealed class MainForm : Form
             !RequireText(_dumpPathTextBox, "保存先"))
             return;
 
+        if (!_includeSchemaCheckBox.Checked && !_includeDataCheckBox.Checked)
+        {
+            ShowError("「スキーマ定義を含める」または「テーブルデータとシーケンス値を含める」を選択してください。");
+            return;
+        }
+
         var path = Path.GetFullPath(_dumpPathTextBox.Text.Trim());
         var database = _dumpDatabaseTextBox.Text.Trim();
         var connectionString = BuildConnectionString(database);
+        var options = CreateDumpOptions();
         await RunOperationAsync("ダンプを作成しています...", async cancellationToken =>
         {
             var directory = Path.GetDirectoryName(path);
@@ -241,7 +320,7 @@ internal sealed class MainForm : Form
             try
             {
                 await new PostgresPlainTextDumper().DumpAsync(
-                    connectionString, output, cancellationToken: cancellationToken);
+                    connectionString, output, options, cancellationToken);
                 await output.DisposeAsync();
                 File.Move(temporaryPath, path, overwrite: true);
             }
@@ -325,12 +404,41 @@ internal sealed class MainForm : Form
 
         var maintenanceConnectionString = BuildConnectionString(maintenanceDatabase);
         var restoreConnectionString = BuildConnectionString(database);
+        var options = new PgRestoreOptions
+        {
+            UseTransaction = _useTransactionCheckBox.Checked,
+            CommandTimeout = decimal.ToInt32(_commandTimeoutInput.Value)
+        };
         await RunOperationAsync("既存DBを削除してリストアしています...", async cancellationToken =>
         {
             await RecreateDatabaseAsync(database, maintenanceConnectionString, cancellationToken);
             await new PostgresPlainTextRestorer().RestoreFileAsync(
-                restoreConnectionString, path, cancellationToken: cancellationToken);
+                restoreConnectionString, path, options, cancellationToken);
         }, $"データベース「{database}」をリストアしました。");
+    }
+
+    private PgDumpOptions CreateDumpOptions()
+    {
+        var options = new PgDumpOptions
+        {
+            IncludeSchema = _includeSchemaCheckBox.Checked,
+            IncludeData = _includeDataCheckBox.Checked,
+            DataFormat = (PgDumpDataFormat)_dataFormatComboBox.SelectedItem!,
+            IncludeUnloggedTableData = _includeUnloggedDataCheckBox.Checked,
+            SerializableDeferrable = _serializableDeferrableCheckBox.Checked,
+            UsePsqlRestrict = _usePsqlRestrictCheckBox.Checked,
+            IncludeOwnership = _includeOwnershipCheckBox.Checked,
+            IncludePrivileges = _includePrivilegesCheckBox.Checked
+        };
+        AddSchemaNames(options.IncludeSchemas, _includeSchemasTextBox.Text);
+        AddSchemaNames(options.ExcludeSchemas, _excludeSchemasTextBox.Text);
+        return options;
+    }
+
+    private static void AddSchemaNames(ISet<string> destination, string value)
+    {
+        foreach (var schema in value.Split([',', ';', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            destination.Add(schema);
     }
 
     private async Task RecreateDatabaseAsync(
