@@ -9,6 +9,17 @@ namespace PgDumpPlane;
 /// <summary>Creates a PostgreSQL plain-text dump by querying the server through Npgsql.</summary>
 public sealed class PostgresPlainTextDumper
 {
+    private static readonly HashSet<string> ListQuotedRoleSettings = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "local_preload_libraries",
+        "oauth_validator_libraries",
+        "search_path",
+        "session_preload_libraries",
+        "shared_preload_libraries",
+        "temp_tablespaces",
+        "unix_socket_directories"
+    };
+
     /// <summary>Dumps a database identified by <paramref name="connectionString"/> to a UTF-8 stream.</summary>
     public async Task DumpAsync(
         string connectionString,
@@ -131,6 +142,8 @@ public sealed class PostgresPlainTextDumper
                 await WriteSecurityAsync(writer, snapshot).ConfigureAwait(false);
             }
 
+            await WriteRoleSettingsAsync(writer, snapshot.RoleSettings).ConfigureAwait(false);
+
             if (restrictKey is not null)
                 await writer.WriteAsync($"\\unrestrict {restrictKey}\n\n").ConfigureAwait(false);
             await writer.WriteAsync("--\n-- PostgreSQL database dump complete\n--\n").ConfigureAwait(false);
@@ -154,6 +167,7 @@ public sealed class PostgresPlainTextDumper
             SET idle_in_transaction_session_timeout = 0;
             SET DateStyle = ISO;
             SET IntervalStyle = postgres;
+            SET standard_conforming_strings = on;
             SET extra_float_digits = 3;
             SET synchronize_seqscans = off;
             SET row_security = off;
@@ -459,6 +473,97 @@ public sealed class PostgresPlainTextDumper
                 .ConfigureAwait(false);
         }
         await writer.WriteAsync('\n').ConfigureAwait(false);
+    }
+
+    internal static async Task WriteRoleSettingsAsync(
+        TextWriter writer,
+        IReadOnlyList<RoleSettingInfo> roleSettings)
+    {
+        if (roleSettings.Count == 0)
+            return;
+
+        await SectionAsync(writer, "ROLE SETTINGS").ConfigureAwait(false);
+        foreach (var setting in roleSettings)
+        {
+            await writer.WriteAsync(
+                $"ALTER ROLE {SqlText.Identifier(setting.Role)} SET {SqlText.Identifier(setting.Name)} TO " +
+                $"{RoleSettingValueSql(setting)};\n").ConfigureAwait(false);
+        }
+        await writer.WriteAsync('\n').ConfigureAwait(false);
+    }
+
+    private static string RoleSettingValueSql(RoleSettingInfo setting)
+    {
+        if (!ListQuotedRoleSettings.Contains(setting.Name))
+            return SqlText.Literal(setting.Value);
+
+        var values = SplitGucList(setting.Value);
+        return values.Count == 0
+            ? "NULL"
+            : string.Join(", ", values.Select(SqlText.Literal));
+    }
+
+    private static IReadOnlyList<string> SplitGucList(string value)
+    {
+        var values = new List<string>();
+        var index = 0;
+
+        while (true)
+        {
+            while (index < value.Length && char.IsWhiteSpace(value[index]))
+                index++;
+            if (index == value.Length)
+                return values;
+
+            var item = new StringBuilder();
+            if (value[index] == '"')
+            {
+                index++;
+                var closed = false;
+                while (index < value.Length)
+                {
+                    if (value[index] != '"')
+                    {
+                        item.Append(value[index++]);
+                        continue;
+                    }
+
+                    index++;
+                    if (index < value.Length && value[index] == '"')
+                    {
+                        item.Append('"');
+                        index++;
+                        continue;
+                    }
+
+                    closed = true;
+                    break;
+                }
+
+                if (!closed)
+                    throw new InvalidDataException($"Invalid list value for role setting: {value}");
+            }
+            else
+            {
+                while (index < value.Length && value[index] != ',' && !char.IsWhiteSpace(value[index]))
+                    item.Append(value[index++]);
+                if (item.Length == 0)
+                    throw new InvalidDataException($"Invalid list value for role setting: {value}");
+            }
+
+            while (index < value.Length && char.IsWhiteSpace(value[index]))
+                index++;
+            if (index == value.Length)
+            {
+                values.Add(item.ToString());
+                return values;
+            }
+            if (value[index] != ',')
+                throw new InvalidDataException($"Invalid list value for role setting: {value}");
+
+            values.Add(item.ToString());
+            index++;
+        }
     }
 
     private static async Task WriteAccessControlAsync(TextWriter writer, AccessControlInfo accessControl)

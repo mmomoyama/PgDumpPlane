@@ -3,7 +3,7 @@ namespace PgDumpPlane;
 internal sealed record PostgresVersionCapabilities(int Major)
 {
     internal const int MinimumSupportedMajor = 12;
-    internal const int MaximumSupportedMajor = 18;
+    internal const int MaximumSupportedMajor = 19;
 
     internal bool SupportsColumnCompression => Major >= 14;
     internal bool SupportsPartitionTriggerClones => Major >= 13;

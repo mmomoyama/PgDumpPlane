@@ -6,6 +6,58 @@ namespace PgDumpPlane.Tests;
 public sealed class PostgresIntegrationTests
 {
     [Fact]
+    public async Task RestoreAsync_DowngradesNewerDumpToConnectedServer()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("PGDUMPPLANE_TEST_CONNECTION");
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return;
+
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var schema = $"restore_compat_{Guid.NewGuid():N}";
+        var qualifiedSchema = SqlText.Identifier(schema);
+        var script = $$"""
+            --
+            -- PostgreSQL database dump
+            --
+
+            -- Dumped from database version 19beta4
+            -- Dumped by PgDumpPlane test
+
+            SET transaction_timeout = 0;
+            CREATE SCHEMA {{qualifiedSchema}};
+            CREATE UNLOGGED SEQUENCE {{qualifiedSchema}}."counter";
+            CREATE TABLE {{qualifiedSchema}}."item" (
+                "source" text CONSTRAINT "source_required" NOT NULL NO INHERIT,
+                "source_length" integer GENERATED ALWAYS AS (length(source)),
+                "nullable_value" integer,
+                CONSTRAINT "item_nullable_key" UNIQUE NULLS NOT DISTINCT ("nullable_value")
+            );
+            ALTER TABLE ONLY {{qualifiedSchema}}."item" ALTER COLUMN "source" SET COMPRESSION pglz;
+            INSERT INTO {{qualifiedSchema}}."item" ("source", "nullable_value") VALUES ('value', NULL);
+            """;
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        try
+        {
+            await new PostgresPlainTextRestorer().RestoreAsync(
+                connection,
+                new StringReader(script),
+                cancellationToken: cancellationToken);
+
+            await using var verify = new NpgsqlCommand(
+                $"SELECT source_length FROM {qualifiedSchema}.item", connection);
+            Assert.Equal(5, await verify.ExecuteScalarAsync(cancellationToken));
+        }
+        finally
+        {
+            await using var cleanup = new NpgsqlCommand(
+                $"DROP SCHEMA IF EXISTS {qualifiedSchema} CASCADE", connection);
+            await cleanup.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    [Fact]
     public async Task RestoreAsync_AcceptsNativePgDumpPlainTextHeader()
     {
         var connectionString = Environment.GetEnvironmentVariable("PGDUMPPLANE_TEST_CONNECTION");
@@ -138,7 +190,13 @@ public sealed class PostgresIntegrationTests
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         var serverMajor = connection.PostgreSqlVersion.Major;
-        Assert.InRange(serverMajor, 12, 18);
+        Assert.InRange(serverMajor, 12, 19);
+        if (serverMajor < 19)
+        {
+            await using var legacyStringSyntax = new NpgsqlCommand(
+                "SET standard_conforming_strings = off", connection);
+            await legacyStringSyntax.ExecuteNonQueryAsync(cancellationToken);
+        }
         var allByteValues = Enumerable.Range(0, 256).Select(x => (byte)x).ToArray();
         var largeBinary = Enumerable.Range(0, 256 * 1024).Select(x => (byte)(x * 31)).ToArray();
         string? alternateOwner = null;
@@ -153,6 +211,7 @@ public sealed class PostgresIntegrationTests
                     state {qualifiedSchema}.mood DEFAULT 'happy',
                     amount numeric(12,2),
                     created_at timestamptz DEFAULT now(),
+                    slash text DEFAULT E'\\',
                     CONSTRAINT parent_pk PRIMARY KEY (id),
                     CONSTRAINT positive_amount CHECK (amount >= 0)
                 ) PARTITION BY RANGE (id);
@@ -239,6 +298,7 @@ public sealed class PostgresIntegrationTests
                     var qualifiedOwner = SqlText.Identifier(alternateOwner);
                     await using var ownerSetup = new NpgsqlCommand($"""
                         CREATE ROLE {qualifiedOwner} NOLOGIN;
+                        ALTER ROLE {qualifiedOwner} SET search_path TO ciserver, serial_num_mng, public;
                         GRANT CREATE ON SCHEMA {qualifiedSchema} TO {qualifiedOwner};
                         ALTER TABLE {qualifiedSchema}.binary_data OWNER TO {qualifiedOwner};
                         """, connection);
@@ -247,6 +307,7 @@ public sealed class PostgresIntegrationTests
             }
 
             var options = new PgDumpOptions();
+            options.IncludeRoleSettings = alternateOwner is not null;
             options.IncludeSchemas.Add(schema);
             await using var stream = new MemoryStream();
             await new PostgresPlainTextDumper().DumpAsync(connection, new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true), options, cancellationToken);
@@ -269,6 +330,10 @@ public sealed class PostgresIntegrationTests
             {
                 Assert.Contains(
                     $"ALTER TABLE {qualifiedSchema}.\"binary_data\" OWNER TO {SqlText.Identifier(alternateOwner)};",
+                    script);
+                Assert.Contains(
+                    $"ALTER ROLE {SqlText.Identifier(alternateOwner)} SET \"search_path\" TO " +
+                    "'ciserver', 'serial_num_mng', 'public';",
                     script);
             }
             Assert.Contains($"GRANT SELECT ON TABLE {qualifiedSchema}.\"binary_data\" TO PUBLIC;", script);
@@ -312,7 +377,7 @@ public sealed class PostgresIntegrationTests
 
             Assert.DoesNotContain($"COPY {qualifiedSchema}.", insertScript);
             var parentInsertPrefix =
-                $"INSERT INTO {qualifiedSchema}.\"parent_first\" (\"id\", \"label\", \"state\", \"amount\", \"created_at\")";
+                $"INSERT INTO {qualifiedSchema}.\"parent_first\" (\"id\", \"label\", \"state\", \"amount\", \"created_at\", \"slash\")";
             Assert.Contains(
                 parentInsertPrefix + (serverMajor >= 17 ? " OVERRIDING SYSTEM VALUE" : string.Empty) +
                 " VALUES ('1', 'hello",
@@ -326,6 +391,12 @@ public sealed class PostgresIntegrationTests
 
             await using (var dropSource = new NpgsqlCommand($"DROP SCHEMA {qualifiedSchema} CASCADE", connection))
                 await dropSource.ExecuteNonQueryAsync(cancellationToken);
+            if (alternateOwner is not null)
+            {
+                await using var resetRoleSetting = new NpgsqlCommand(
+                    $"ALTER ROLE {SqlText.Identifier(alternateOwner)} RESET search_path", connection);
+                await resetRoleSetting.ExecuteNonQueryAsync(cancellationToken);
+            }
             await using var copyRestoreStream = new MemoryStream(Encoding.UTF8.GetBytes(script));
             await new PostgresPlainTextRestorer().RestoreAsync(
                 connectionString,
@@ -334,6 +405,14 @@ public sealed class PostgresIntegrationTests
             await AssertRestoredDataAsync(
                 connection, qualifiedSchema, serverMajor, allByteValues, largeBinary, cancellationToken);
             await AssertRestoredSecurityAsync(connection, schema, alternateOwner, cancellationToken);
+            if (alternateOwner is not null)
+            {
+                await using var verifyRoleSetting = new NpgsqlCommand(
+                    "SELECT rolconfig @> ARRAY['search_path=ciserver, serial_num_mng, public'] " +
+                    "FROM pg_catalog.pg_roles WHERE rolname = @role", connection);
+                verifyRoleSetting.Parameters.AddWithValue("role", alternateOwner);
+                Assert.True((bool)(await verifyRoleSetting.ExecuteScalarAsync(cancellationToken))!);
+            }
 
             await using (var dropCopyRestore = new NpgsqlCommand($"DROP SCHEMA {qualifiedSchema} CASCADE", connection))
                 await dropCopyRestore.ExecuteNonQueryAsync(cancellationToken);
@@ -365,9 +444,12 @@ public sealed class PostgresIntegrationTests
         CancellationToken cancellationToken)
     {
         await using (var verify = new NpgsqlCommand(
-            $"SELECT label FROM {qualifiedSchema}.parent_first WHERE id = 1", connection))
+            $"SELECT label, slash FROM {qualifiedSchema}.parent_first WHERE id = 1", connection))
         {
-            Assert.Equal("hello\nworld", await verify.ExecuteScalarAsync(cancellationToken));
+            await using var reader = await verify.ExecuteReaderAsync(cancellationToken);
+            Assert.True(await reader.ReadAsync(cancellationToken));
+            Assert.Equal("hello\nworld", reader.GetString(0));
+            Assert.Equal("\\", reader.GetString(1));
         }
         if (serverMajor >= 18)
         {

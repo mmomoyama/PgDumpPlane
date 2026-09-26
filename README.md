@@ -76,6 +76,17 @@ are accepted. Arbitrary SQL files and the custom, directory, or tar archive
 formats produced by `pg_dump` are rejected; use `pg_restore` for those archive
 formats.
 
+The restorer compares the PostgreSQL major version in the dump header with the
+connected destination server. When the destination is older, it automatically
+downgrades known syntax: unsupported session settings and column compression
+are omitted, unlogged sequences become regular sequences, `NULLS NOT DISTINCT`
+becomes ordinary unique semantics, PostgreSQL 18 virtual generated columns
+become stored generated columns, and named/`NO INHERIT` NOT NULL properties are
+reduced to ordinary NOT NULL or omitted when inheritance semantics cannot be
+preserved. PostgreSQL 12 cannot recreate triggers on a
+partitioned parent table, so those triggers are omitted. This compatibility
+processing is inactive when restoring to the same or a newer major version.
+
 By default, restore runs in one transaction so a failure rolls back the whole
 operation. This can be changed when a transaction is not appropriate:
 
@@ -103,7 +114,9 @@ understand the guard. Set `UsePsqlRestrict = false` for other SQL clients.
 
 ## Current scope
 
-The package supports PostgreSQL 12 through 18 and writes:
+The package supports PostgreSQL 12 through 19. PostgreSQL 19 support is based
+on PostgreSQL 19 Beta 4 and should be treated as preview support until the
+final PostgreSQL 19 release. The package writes:
 
 - user schemas and extensions;
 - enum types and routines;
@@ -126,6 +139,12 @@ settings should not be restored. PostgreSQL does not provide an `ALTER
 EXTENSION ... OWNER TO` command, so extensions are owned by the user that runs
 the restore.
 
+Cluster-wide role settings such as `ALTER ROLE postgres SET search_path ...`
+are excluded by default. Set `IncludeRoleSettings = true` to emit them. This
+affects every database that uses the role, and each referenced role must
+already exist on the destination server. Database-specific `ALTER ROLE ... IN
+DATABASE ...` settings are not included.
+
 Ownership is enabled by default. It is restored with statements such as
 `ALTER SCHEMA "app" OWNER TO "postgres";` and `ALTER FUNCTION
 "app"."calculate"() OWNER TO "postgres";`.
@@ -145,18 +164,20 @@ server's major version:
 | 16 | PostgreSQL 16 catalog-compatible output |
 | 17 | `transaction_timeout` session and restore settings |
 | 18 | Virtual generated columns and named/`NO INHERIT` NOT NULL constraints |
+| 19 Beta 4 | PostgreSQL 19 catalog-compatible output; `standard_conforming_strings` is forced on while reading catalog definitions, matching PostgreSQL 19 `pg_dump` |
 
 Constraint syntax introduced by newer releases is retained through
-`pg_get_constraintdef()`. Servers older than 12 and newer than 18 are rejected
+`pg_get_constraintdef()`. Servers older than 12 and newer than 19 are rejected
 instead of risking an invalid dump. CI runs the integration test against every
-PostgreSQL major version from 12 through 18.
+PostgreSQL major version from 12 through 18 and PostgreSQL 19 Beta 4.
 
 This is not yet a byte-for-byte or feature-complete replacement for native
-`pg_dump`. Version 0.2 does not dump comments, domains, standalone composite
+`pg_dump`. Version 0.5 does not dump comments, domains, standalone composite
 types, foreign tables, materialized views, large objects,
 row-security policies, publications/subscriptions, statistics objects, or
-security labels. For those objects, or for cross-major-version migrations,
-use the native `pg_dump` tool.
+security labels. Use the native `pg_dump` tool when those objects must be
+migrated. Automatic downgrade handling applies only to the object kinds and
+version differences described above.
 
 ## Build a NuGet package
 
@@ -172,9 +193,9 @@ creating and restoring dump files. Enter the PostgreSQL host, credentials,
 database, and file path, then select the dump or restore operation.
 
 The dump tab exposes schema filters, schema/data selection, COPY or INSERT
-format, unlogged-table data, ownership, privileges, snapshot mode, and the
-`psql` restrict guard. The restore tab exposes transaction handling and command
-timeout settings.
+format, unlogged-table data, ownership, privileges, cluster-wide role settings,
+snapshot mode, and the `psql` restrict guard. The restore tab exposes
+transaction handling and command timeout settings.
 
 The restore operation validates the dump first, disconnects users from the
 target database, drops and recreates that database, and then restores the dump.

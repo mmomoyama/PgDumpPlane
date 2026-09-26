@@ -133,10 +133,13 @@ public sealed class PostgresPlainTextRestorer
             throw new InvalidOperationException("The connection must be open.");
         if (connection.Database is null)
             throw new InvalidOperationException("The connection must select a database.");
-        _ = PostgresVersionCapabilities.Create(connection.PostgreSqlVersion);
+        var targetCapabilities = PostgresVersionCapabilities.Create(connection.PostgreSqlVersion);
 
         // Validate before opening a transaction or executing any content from the file.
-        _ = await PgDumpFormat.ReadAndValidateHeaderAsync(source, cancellationToken).ConfigureAwait(false);
+        var header = await PgDumpFormat.ReadAndValidateHeaderAsync(source, cancellationToken).ConfigureAwait(false);
+        var compatibility = new RestoreCompatibilityProcessor(
+            header.SourceMajorVersion,
+            targetCapabilities.Major);
 
         await using var transaction = options.UseTransaction
             ? await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false)
@@ -158,7 +161,9 @@ public sealed class PostgresPlainTextRestorer
                 var statements = parser.AppendLine(line);
                 for (var index = 0; index < statements.Count; index++)
                 {
-                    var statement = statements[index];
+                    var statement = compatibility.Process(statements[index]);
+                    if (statement is null)
+                        continue;
                     if (TryGetCopyCommand(statement, out var copyCommand))
                     {
                         if (index + 1 != statements.Count)

@@ -43,6 +43,12 @@ public sealed class PgDumpOptions
     /// <summary>Write explicit object and column access privileges. Defaults to <see langword="true"/>.</summary>
     public bool IncludePrivileges { get; set; } = true;
 
+    /// <summary>
+    /// Write cluster-wide settings for roles that have them. The roles must already exist when restoring.
+    /// Defaults to <see langword="false"/>.
+    /// </summary>
+    public bool IncludeRoleSettings { get; set; }
+
     /// <summary>Leave the supplied stream or writer open after dumping.</summary>
     public bool LeaveOpen { get; set; } = true;
 

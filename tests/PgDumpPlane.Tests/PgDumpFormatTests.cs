@@ -57,9 +57,28 @@ public sealed class PgDumpFormatTests
         var header = await PgDumpFormat.ReadAndValidateHeaderAsync(reader, TestContext.Current.CancellationToken);
 
         Assert.Equal("18.1", header.SourceDatabaseVersion);
+        Assert.Equal(18, header.SourceMajorVersion);
         Assert.Equal(PgDumpProducer.PgDumpPlane, header.Producer);
         Assert.Equal("0.2.0", header.ProducerVersion);
         Assert.Equal(string.Empty, await reader.ReadLineAsync(TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ReadAndValidateHeaderAsync_ParsesBetaSourceMajorVersion()
+    {
+        using var reader = new StringReader("""
+            --
+            -- PostgreSQL database dump
+            --
+
+            -- Dumped from database version 19beta4
+            -- Dumped by PgDumpPlane 0.2.0
+
+            """);
+
+        var header = await PgDumpFormat.ReadAndValidateHeaderAsync(reader, TestContext.Current.CancellationToken);
+
+        Assert.Equal(19, header.SourceMajorVersion);
     }
 
     [Fact]

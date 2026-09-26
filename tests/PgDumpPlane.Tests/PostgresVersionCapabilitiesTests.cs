@@ -10,6 +10,7 @@ public sealed class PostgresVersionCapabilitiesTests
     [InlineData(16, true, true, false, false)]
     [InlineData(17, true, true, true, false)]
     [InlineData(18, true, true, true, true)]
+    [InlineData(19, true, true, true, true)]
     public void Create_MapsVersionSpecificCapabilities(
         int major,
         bool columnCompression,
@@ -29,12 +30,12 @@ public sealed class PostgresVersionCapabilitiesTests
 
     [Theory]
     [InlineData(11)]
-    [InlineData(19)]
+    [InlineData(20)]
     public void Create_RejectsServersOutsideSupportedRange(int major)
     {
         var exception = Assert.Throws<NotSupportedException>(
             () => PostgresVersionCapabilities.Create(new Version(major, 0)));
 
-        Assert.Contains("PostgreSQL 12 through 18", exception.Message);
+        Assert.Contains("PostgreSQL 12 through 19", exception.Message);
     }
 }

@@ -23,6 +23,7 @@ internal sealed class MainForm : Form
     private readonly CheckBox _usePsqlRestrictCheckBox = new() { Text = "psqlの \\restrictガードを出力", Checked = true, AutoSize = true };
     private readonly CheckBox _includeOwnershipCheckBox = new() { Text = "所有者を含める", Checked = true, AutoSize = true };
     private readonly CheckBox _includePrivilegesCheckBox = new() { Text = "権限を含める", Checked = true, AutoSize = true };
+    private readonly CheckBox _includeRoleSettingsCheckBox = new() { Text = "ロール設定を含める（クラスタ全体に影響）", AutoSize = true };
     private readonly Button _dumpButton = new() { Text = "ダンプを作成", AutoSize = true };
 
     private readonly TextBox _restoreDatabaseTextBox = new();
@@ -163,6 +164,7 @@ internal sealed class MainForm : Form
             _includeUnloggedDataCheckBox,
             _includeOwnershipCheckBox,
             _includePrivilegesCheckBox,
+            _includeRoleSettingsCheckBox,
             _serializableDeferrableCheckBox,
             _usePsqlRestrictCheckBox));
         return layout;
@@ -428,7 +430,8 @@ internal sealed class MainForm : Form
             SerializableDeferrable = _serializableDeferrableCheckBox.Checked,
             UsePsqlRestrict = _usePsqlRestrictCheckBox.Checked,
             IncludeOwnership = _includeOwnershipCheckBox.Checked,
-            IncludePrivileges = _includePrivilegesCheckBox.Checked
+            IncludePrivileges = _includePrivilegesCheckBox.Checked,
+            IncludeRoleSettings = _includeRoleSettingsCheckBox.Checked
         };
         AddSchemaNames(options.IncludeSchemas, _includeSchemasTextBox.Text);
         AddSchemaNames(options.ExcludeSchemas, _excludeSchemasTextBox.Text);

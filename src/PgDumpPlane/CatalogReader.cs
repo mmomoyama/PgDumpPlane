@@ -32,10 +32,13 @@ internal static class CatalogReader
         var accessControls = options.IncludeSchema && options.IncludePrivileges
             ? await ReadAccessControlsAsync(connection, selected, cancellationToken).ConfigureAwait(false)
             : [];
+        var roleSettings = options.IncludeRoleSettings
+            ? await ReadRoleSettingsAsync(connection, cancellationToken).ConfigureAwait(false)
+            : [];
 
         return new(
             database, schemas, extensions, enums, routines, sequences, tables, views, constraints, indexes, triggers,
-            ownership, accessControls);
+            ownership, accessControls, roleSettings);
     }
 
     private static async Task<DatabaseInfo> ReadDatabaseAsync(
@@ -610,4 +613,28 @@ internal static class CatalogReader
 
     private static string? GetNullableString(NpgsqlDataReader reader, int ordinal) =>
         reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
+
+    private static async Task<IReadOnlyList<RoleSettingInfo>> ReadRoleSettingsAsync(
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT r.rolname,
+                   pg_catalog.split_part(config.value, '=', 1),
+                   pg_catalog.substr(config.value, pg_catalog.strpos(config.value, '=') + 1)
+            FROM pg_catalog.pg_db_role_setting setting
+            JOIN pg_catalog.pg_roles r ON r.oid = setting.setrole
+            CROSS JOIN LATERAL pg_catalog.unnest(setting.setconfig) AS config(value)
+            WHERE setting.setdatabase = 0
+              AND setting.setrole <> 0
+              AND pg_catalog.strpos(config.value, '=') > 0
+            ORDER BY r.rolname, config.value
+            """;
+        var result = new List<RoleSettingInfo>();
+        await using var command = new NpgsqlCommand(sql, connection);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+        return result;
+    }
 }

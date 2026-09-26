@@ -10,6 +10,7 @@ public sealed class PgDumpOptionsTests
         Assert.Equal(PgDumpDataFormat.Copy, options.DataFormat);
         Assert.True(options.IncludeOwnership);
         Assert.True(options.IncludePrivileges);
+        Assert.False(options.IncludeRoleSettings);
     }
 
     [Fact]

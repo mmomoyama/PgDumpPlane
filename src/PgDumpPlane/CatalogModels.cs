@@ -84,6 +84,8 @@ internal sealed record AccessControlInfo(
     string Owner,
     IReadOnlyList<PrivilegeInfo> Privileges);
 
+internal sealed record RoleSettingInfo(string Role, string Name, string Value);
+
 internal sealed record CatalogSnapshot(
     DatabaseInfo Database,
     IReadOnlyList<SchemaInfo> Schemas,
@@ -97,4 +99,5 @@ internal sealed record CatalogSnapshot(
     IReadOnlyList<IndexInfo> Indexes,
     IReadOnlyList<TriggerInfo> Triggers,
     IReadOnlyList<OwnershipInfo> Ownership,
-    IReadOnlyList<AccessControlInfo> AccessControls);
+    IReadOnlyList<AccessControlInfo> AccessControls,
+    IReadOnlyList<RoleSettingInfo> RoleSettings);

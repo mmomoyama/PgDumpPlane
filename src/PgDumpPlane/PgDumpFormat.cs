@@ -11,7 +11,24 @@ internal enum PgDumpProducer
 internal sealed record PgDumpHeader(
     string SourceDatabaseVersion,
     PgDumpProducer Producer,
-    string ProducerVersion);
+    string ProducerVersion)
+{
+    internal int SourceMajorVersion
+    {
+        get
+        {
+            var digits = SourceDatabaseVersion.AsSpan().TrimStart();
+            var length = 0;
+            while (length < digits.Length && char.IsDigit(digits[length]))
+                length++;
+            if (length == 0 || !int.TryParse(digits[..length], out var major))
+                throw new InvalidDataException(
+                    $"The input is not a supported PostgreSQL plain-text dump: " +
+                    $"the source database version '{SourceDatabaseVersion}' is invalid.");
+            return major;
+        }
+    }
+}
 
 internal static class PgDumpFormat
 {

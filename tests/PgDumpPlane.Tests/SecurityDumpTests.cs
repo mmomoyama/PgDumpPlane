@@ -84,6 +84,39 @@ public sealed class SecurityDumpTests
             sql.IndexOf("GRANT UPDATE (\"private value\")", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task WriteRoleSettingsAsync_WritesQuotedRoleAndSettingValues()
+    {
+        using var writer = new StringWriter();
+
+        await PostgresPlainTextDumper.WriteRoleSettingsAsync(
+            writer,
+            [new("role\"name", "search_path", "ciserver, serial_num_mng, public")]);
+
+        Assert.Contains(
+            "ALTER ROLE \"role\"\"name\" SET \"search_path\" TO 'ciserver', 'serial_num_mng', 'public';",
+            writer.ToString());
+    }
+
+    [Fact]
+    public async Task WriteRoleSettingsAsync_ParsesQuotedListValuesAndLeavesScalarValuesIntact()
+    {
+        using var writer = new StringWriter();
+
+        await PostgresPlainTextDumper.WriteRoleSettingsAsync(
+            writer,
+            [
+                new("app", "search_path", "\"odd,schema\", \"quoted\"\"name\", public"),
+                new("app", "work_mem", "64MB")
+            ]);
+
+        var sql = writer.ToString();
+        Assert.Contains(
+            "ALTER ROLE \"app\" SET \"search_path\" TO 'odd,schema', 'quoted\"name', 'public';",
+            sql);
+        Assert.Contains("ALTER ROLE \"app\" SET \"work_mem\" TO '64MB';", sql);
+    }
+
     private static CatalogSnapshot Snapshot(
         IReadOnlyList<OwnershipInfo> ownership,
         IReadOnlyList<AccessControlInfo> accessControls) =>
@@ -100,5 +133,6 @@ public sealed class SecurityDumpTests
             [],
             [],
             ownership,
-            accessControls);
+            accessControls,
+            []);
 }
