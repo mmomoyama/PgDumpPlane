@@ -1,9 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!-- テスト専用プロジェクトなのでNuGetの公開パッケージは作成しません。
+       This test-only project does not produce a publishable NuGet package. -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
+    <!-- xUnit v3をdotnet testから実行し、ランナー依存を利用者へ公開しません。
+         Run xUnit v3 through dotnet test without exposing runner dependencies to consumers. -->
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
     <PackageReference Include="xunit.v3" Version="3.2.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">

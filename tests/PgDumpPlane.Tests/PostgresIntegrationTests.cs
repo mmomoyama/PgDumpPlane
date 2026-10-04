@@ -3,11 +3,22 @@ using Npgsql;
 
 namespace PgDumpPlane.Tests;
 
+/// <summary>
+/// <para>PostgresIntegrationの動作と境界条件を検証します。</para>
+/// <para>Verifies behavior and boundary conditions of PostgresIntegration.</para>
+/// </summary>
 public sealed class PostgresIntegrationTests
 {
+    /// <summary>
+    /// <para>新しいバージョンの構文を実サーバーに復元し、生成列の値を確認します。</para>
+    /// <para>Restores newer-version syntax to a live server and verifies the generated value.</para>
+    /// </summary>
+    /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
     [Fact]
     public async Task RestoreAsync_DowngradesNewerDumpToConnectedServer()
     {
+        // 接続文字列が未指定ならDB検証は実行せず戻ります。実機検証には環境変数が必要です。
+        // Return without database verification when the connection string is absent; live checks require this environment variable.
         var connectionString = Environment.GetEnvironmentVariable("PGDUMPPLANE_TEST_CONNECTION");
         if (string.IsNullOrWhiteSpace(connectionString))
             return;
@@ -57,6 +68,11 @@ public sealed class PostgresIntegrationTests
         }
     }
 
+    /// <summary>
+    /// <para>標準pg_dump形式のヘッダーを持つSQLを実サーバーへ復元できることを確認します。</para>
+    /// <para>Verifies restoration of SQL with a native pg_dump header to a live server.</para>
+    /// </summary>
+    /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
     [Fact]
     public async Task RestoreAsync_AcceptsNativePgDumpPlainTextHeader()
     {
@@ -100,6 +116,11 @@ public sealed class PostgresIntegrationTests
         }
     }
 
+    /// <summary>
+    /// <para>ダンプ以外の入力に含まれるSQLが実行前に拒否されることを確認します。</para>
+    /// <para>Verifies rejection of non-dump input before its SQL executes.</para>
+    /// </summary>
+    /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
     [Fact]
     public async Task RestoreAsync_RejectsNonDumpBeforeExecutingSql()
     {
@@ -132,6 +153,11 @@ public sealed class PostgresIntegrationTests
         }
     }
 
+    /// <summary>
+    /// <para>途中でSQLが失敗した場合に、それ以前の変更もロールバックされることを確認します。</para>
+    /// <para>Verifies rollback of earlier changes when a later SQL statement fails.</para>
+    /// </summary>
+    /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
     [Fact]
     public async Task RestoreAsync_RollsBackTheWholeDumpOnFailure()
     {
@@ -177,6 +203,11 @@ public sealed class PostgresIntegrationTests
         }
     }
 
+    /// <summary>
+    /// <para>各種オブジェクト・データ・権限をCOPYとINSERTで往復させて検証します。</para>
+    /// <para>Verifies round trips of supported objects, data, and security in COPY and INSERT formats.</para>
+    /// </summary>
+    /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
     [Fact]
     public async Task DumpAsync_StreamsRestorableObjectKindsAndTableData()
     {
@@ -435,6 +466,17 @@ public sealed class PostgresIntegrationTests
         }
     }
 
+    /// <summary>
+    /// <para>復元された文字列、生成列、バイナリ値を検証します。</para>
+    /// <para>Verifies restored strings, generated columns, and binary values.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="qualifiedSchema">引用済みのスキーマ名。 Quoted schema name.</param>
+    /// <param name="serverMajor">実サーバーのメジャーバージョン。 Live server major version.</param>
+    /// <param name="allByteValues">全バイト値を含む期待データ。 Expected data containing every byte value.</param>
+    /// <param name="largeBinary">大きなbyteaの期待データ。 Expected large bytea payload.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
     private static async Task AssertRestoredDataAsync(
         NpgsqlConnection connection,
         string qualifiedSchema,
@@ -465,6 +507,15 @@ public sealed class PostgresIntegrationTests
             cancellationToken);
     }
 
+    /// <summary>
+    /// <para>復元されたオブジェクト権限、列権限、所有者を検証します。</para>
+    /// <para>Verifies restored object privileges, column privileges, and ownership.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="schema">スキーマ名。 Schema name.</param>
+    /// <param name="expectedTableOwner">期待する所有者。nullの場合は所有者の検証を省略します。 Expected owner, or null to skip the ownership assertion.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
     private static async Task AssertRestoredSecurityAsync(
         NpgsqlConnection connection,
         string schema,
@@ -496,6 +547,16 @@ public sealed class PostgresIntegrationTests
             Assert.Equal(expectedTableOwner, reader.GetString(3));
     }
 
+    /// <summary>
+    /// <para>NULL・空配列・全バイト値・大きなbyteaを行順に検証します。</para>
+    /// <para>Checks null, empty, all-byte, and large bytea values in row order.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="qualifiedTable">スキーマ修飾と引用済みのテーブル名。 Schema-qualified and quoted table name.</param>
+    /// <param name="allByteValues">全バイト値を含む期待データ。 Expected data containing every byte value.</param>
+    /// <param name="largeBinary">大きなbyteaの期待データ。 Expected large bytea payload.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
     private static async Task AssertBinaryRowsAsync(
         NpgsqlConnection connection,
         string qualifiedTable,
@@ -503,6 +564,8 @@ public sealed class PostgresIntegrationTests
         byte[] largeBinary,
         CancellationToken cancellationToken)
     {
+        // NULLと長さ0のbyteaは異なる値なので、区別して往復検証します。
+        // NULL and zero-length bytea are different values; verify both independently.
         byte[]?[] expected = [null, [], allByteValues, largeBinary];
         await using var command = new NpgsqlCommand($"SELECT id, payload FROM {qualifiedTable} ORDER BY id", connection);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

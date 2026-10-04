@@ -1,4 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!-- Windows Formsアプリとして構築します。CIでの他OSからのクロスビルドも許可します。
+       Build as a Windows Forms application and allow cross-building from other operating systems in CI. -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
@@ -8,6 +10,8 @@
     <RootNamespace>PgDumpPlane.WinForms</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <!-- 公開パッケージではなく同じリポジトリのライブラリを参照して動作を確認します。
+         Reference the library in this repository to exercise its current implementation. -->
     <ProjectReference Include="../../src/PgDumpPlane/PgDumpPlane.csproj" />
   </ItemGroup>
 </Project>

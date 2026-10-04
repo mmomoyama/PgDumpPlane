@@ -2,8 +2,21 @@ using Npgsql;
 
 namespace PgDumpPlane;
 
+/// <summary>
+/// <para>PostgreSQLカタログから、ダンプ対象の定義と権限を読み取ります。</para>
+/// <para>Reads dump definitions and security metadata from PostgreSQL catalogs.</para>
+/// </summary>
 internal static class CatalogReader
 {
+    /// <summary>
+    /// <para>選択されたオブジェクトを同じ接続から順に読み取り、ダンプ用のカタログ情報をまとめます。</para>
+    /// <para>Reads selected objects sequentially on one connection and assembles the dump catalog.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="options">ダンプ設定。公開APIではnullの場合に既定値を使用します。 Dump options; null uses defaults in public APIs.</param>
+    /// <param name="capabilities">接続先サーバーのバージョン別機能。 Version-specific capabilities of the connected server.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>取得した定義・権限を含むカタログを返すタスク。 A task returning the catalog of definitions and security metadata.</returns>
     internal static async Task<CatalogSnapshot> ReadAsync(
         NpgsqlConnection connection,
         PgDumpOptions options,
@@ -14,6 +27,7 @@ internal static class CatalogReader
         var schemas = await ReadSchemasAsync(connection, options, cancellationToken).ConfigureAwait(false);
         var selected = schemas.Select(x => x.Name).ToHashSet(StringComparer.Ordinal);
 
+        // 接続上で有効なコマンドは一つだけなので、カタログを並列に読まないでください。
         // Keep catalog reads sequential: Npgsql permits one active command per connection.
         var extensions = await ReadExtensionsAsync(connection, selected, cancellationToken).ConfigureAwait(false);
         var enums = await ReadEnumsAsync(connection, selected, cancellationToken).ConfigureAwait(false);
@@ -41,6 +55,14 @@ internal static class CatalogReader
             ownership, accessControls, roleSettings);
     }
 
+    /// <summary>
+    /// <para>接続先のデータベース名とサーバーバージョンを取得します。</para>
+    /// <para>Reads the connected database name and server version.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="capabilities">接続先サーバーのバージョン別機能。 Version-specific capabilities of the connected server.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>接続先のDBとバージョン情報を返すタスク。 A task returning database and version metadata.</returns>
     private static async Task<DatabaseInfo> ReadDatabaseAsync(
         NpgsqlConnection connection,
         PostgresVersionCapabilities capabilities,
@@ -52,6 +74,14 @@ internal static class CatalogReader
         return new(reader.GetString(0), reader.GetString(1), capabilities.Major);
     }
 
+    /// <summary>
+    /// <para>システムスキーマを除き、対象・除外条件を満たすスキーマを取得します。</para>
+    /// <para>Reads non-system schemas that satisfy the include and exclude filters.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="options">ダンプ設定。公開APIではnullの場合に既定値を使用します。 Dump options; null uses defaults in public APIs.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>対象スキーマの一覧を返すタスク。 A task returning the selected schemas.</returns>
     private static async Task<IReadOnlyList<SchemaInfo>> ReadSchemasAsync(
         NpgsqlConnection connection,
         PgDumpOptions options,
@@ -77,6 +107,14 @@ internal static class CatalogReader
         return result;
     }
 
+    /// <summary>
+    /// <para>選択されたスキーマに属する拡張機能を取得します。</para>
+    /// <para>Reads extensions belonging to the selected schemas.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="selected">選択されたスキーマ名の集合。 Set of selected schema names.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>対象拡張機能の一覧を返すタスク。 A task returning the selected extensions.</returns>
     private static async Task<IReadOnlyList<ExtensionInfo>> ReadExtensionsAsync(
         NpgsqlConnection connection,
         ISet<string> selected,
@@ -100,6 +138,14 @@ internal static class CatalogReader
         return result;
     }
 
+    /// <summary>
+    /// <para>拡張機能に属さない列挙型を取得し、ラベルを定義順にまとめます。</para>
+    /// <para>Reads enums outside extensions and groups labels in their declared order.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="selected">選択されたスキーマ名の集合。 Set of selected schema names.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>定義順のラベルを含む列挙型一覧を返すタスク。 A task returning enums with ordered labels.</returns>
     private static async Task<IReadOnlyList<EnumTypeInfo>> ReadEnumsAsync(
         NpgsqlConnection connection,
         ISet<string> selected,
@@ -130,6 +176,14 @@ internal static class CatalogReader
             .ToArray();
     }
 
+    /// <summary>
+    /// <para>拡張機能に属さない関数とプロシージャの定義を取得します。</para>
+    /// <para>Reads definitions of functions and procedures outside extensions.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="selected">選択されたスキーマ名の集合。 Set of selected schema names.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>関数・プロシージャの定義一覧を返すタスク。 A task returning routine definitions.</returns>
     private static async Task<IReadOnlyList<RoutineInfo>> ReadRoutinesAsync(
         NpgsqlConnection connection,
         ISet<string> selected,
@@ -158,12 +212,23 @@ internal static class CatalogReader
         return result;
     }
 
+    /// <summary>
+    /// <para>シーケンスの設定、所有列、およびIDENTITYとの関連を取得します。</para>
+    /// <para>Reads sequence settings, owning columns, and identity associations.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="selected">選択されたスキーマ名の集合。 Set of selected schema names.</param>
+    /// <param name="capabilities">接続先サーバーのバージョン別機能。 Version-specific capabilities of the connected server.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>設定と所有列を含むシーケンス一覧を返すタスク。 A task returning sequences with settings and owning columns.</returns>
     private static async Task<IReadOnlyList<SequenceInfo>> ReadSequencesAsync(
         NpgsqlConnection connection,
         ISet<string> selected,
         PostgresVersionCapabilities capabilities,
         CancellationToken cancellationToken)
     {
+        // 古いサーバーで新機能を参照しないよう、SQL式を機能境界で切り替えます。
+        // Select SQL expressions by capability to avoid referencing unsupported features.
         var unloggedExpression = capabilities.SupportsUnloggedSequences
             ? "c.relpersistence = 'u'"
             : "false";
@@ -207,6 +272,15 @@ internal static class CatalogReader
         return result;
     }
 
+    /// <summary>
+    /// <para>テーブルとパーティションの定義を取得し、列情報を関連付けます。</para>
+    /// <para>Reads table and partition definitions and attaches their column metadata.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="selected">選択されたスキーマ名の集合。 Set of selected schema names.</param>
+    /// <param name="capabilities">接続先サーバーのバージョン別機能。 Version-specific capabilities of the connected server.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>列情報を含むテーブル一覧を返すタスク。 A task returning tables with column metadata.</returns>
     private static async Task<IReadOnlyList<TableInfo>> ReadTablesAsync(
         NpgsqlConnection connection,
         ISet<string> selected,
@@ -253,12 +327,23 @@ internal static class CatalogReader
             x.Options, x.Tablespace, columns.GetValueOrDefault(x.Oid) ?? [])).ToArray();
     }
 
+    /// <summary>
+    /// <para>対応バージョンのカタログを使い、テーブルOIDごとに列定義を取得します。</para>
+    /// <para>Reads column definitions by table OID using version-appropriate catalogs.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="selectedOids">選択されたオブジェクトOIDの集合。 Set of selected object OIDs.</param>
+    /// <param name="capabilities">接続先サーバーのバージョン別機能。 Version-specific capabilities of the connected server.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>テーブルOIDをキーとする列定義一覧を返すタスク。 A task returning column lists keyed by table OID.</returns>
     private static async Task<Dictionary<uint, IReadOnlyList<ColumnInfo>>> ReadColumnsAsync(
         NpgsqlConnection connection,
         ISet<uint> selectedOids,
         PostgresVersionCapabilities capabilities,
         CancellationToken cancellationToken)
     {
+        // 存在しないカタログ列はSELECTの解析時に失敗するため、古い版では型付きNULLを返します。
+        // An absent catalog column fails during query parsing; use typed NULL on older servers.
         var compressionExpression = capabilities.SupportsColumnCompression
             ? "CASE a.attcompression WHEN 'p' THEN 'pglz' WHEN 'l' THEN 'lz4' END"
             : "NULL::text";
@@ -310,6 +395,14 @@ internal static class CatalogReader
         return result;
     }
 
+    /// <summary>
+    /// <para>ビュー定義を取得し、作成順序を決める依存先を関連付けます。</para>
+    /// <para>Reads view definitions and attaches dependencies needed for creation order.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="selected">選択されたスキーマ名の集合。 Set of selected schema names.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>依存情報を含むビュー一覧を返すタスク。 A task returning views with dependencies.</returns>
     private static async Task<IReadOnlyList<ViewInfo>> ReadViewsAsync(
         NpgsqlConnection connection,
         ISet<string> selected,
@@ -338,12 +431,22 @@ internal static class CatalogReader
                     raw.Add((reader.GetFieldValue<uint>(0), schema, reader.GetString(2), reader.GetString(3), GetNullableString(reader, 4)));
             }
         }
+        // ビューの依存先はpg_rewriteのルールに記録されるため、定義と別に取得します。
+        // View dependencies live on pg_rewrite rules, so read them separately from view definitions.
         var oids = raw.Select(x => x.Oid).ToHashSet();
         var dependencies = await ReadViewDependenciesAsync(connection, oids, cancellationToken).ConfigureAwait(false);
         return raw.Select(x => new ViewInfo(x.Oid, x.Schema, x.Name, x.Definition, x.Options,
             dependencies.GetValueOrDefault(x.Oid) ?? [])).ToArray();
     }
 
+    /// <summary>
+    /// <para>リライトルールの依存関係から、選択されたビュー同士の参照を取得します。</para>
+    /// <para>Reads references between selected views through rewrite-rule dependencies.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="selectedOids">選択されたオブジェクトOIDの集合。 Set of selected object OIDs.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>ビューOIDごとの依存先OID一覧を返すタスク。 A task returning dependency OIDs by view OID.</returns>
     private static async Task<Dictionary<uint, IReadOnlyList<uint>>> ReadViewDependenciesAsync(
         NpgsqlConnection connection,
         ISet<uint> selectedOids,
@@ -373,6 +476,14 @@ internal static class CatalogReader
         return mutable.ToDictionary(x => x.Key, x => (IReadOnlyList<uint>)x.Value);
     }
 
+    /// <summary>
+    /// <para>選択されたテーブルに直接定義された制約を復元順序で取得します。</para>
+    /// <para>Reads locally defined constraints on selected tables in restoration order.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="selectedOids">選択されたオブジェクトOIDの集合。 Set of selected object OIDs.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>対象テーブルの制約一覧を返すタスク。 A task returning selected table constraints.</returns>
     private static async Task<IReadOnlyList<ConstraintInfo>> ReadConstraintsAsync(
         NpgsqlConnection connection,
         ISet<uint> selectedOids,
@@ -401,6 +512,14 @@ internal static class CatalogReader
         return result;
     }
 
+    /// <summary>
+    /// <para>制約によって作成される索引を除き、有効な独立索引を取得します。</para>
+    /// <para>Reads valid standalone indexes, excluding indexes created by constraints.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="selectedOids">選択されたオブジェクトOIDの集合。 Set of selected object OIDs.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>独立索引の一覧を返すタスク。 A task returning standalone indexes.</returns>
     private static async Task<IReadOnlyList<IndexInfo>> ReadIndexesAsync(
         NpgsqlConnection connection,
         ISet<uint> selectedOids,
@@ -428,12 +547,23 @@ internal static class CatalogReader
         return result;
     }
 
+    /// <summary>
+    /// <para>内部トリガーと自動複製された子トリガーを除いて定義を取得します。</para>
+    /// <para>Reads trigger definitions excluding internal triggers and, where supported, child clones.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="selectedOids">選択されたオブジェクトOIDの集合。 Set of selected object OIDs.</param>
+    /// <param name="capabilities">接続先サーバーのバージョン別機能。 Version-specific capabilities of the connected server.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>出力対象トリガーの一覧を返すタスク。 A task returning triggers selected for output.</returns>
     private static async Task<IReadOnlyList<TriggerInfo>> ReadTriggersAsync(
         NpgsqlConnection connection,
         ISet<uint> selectedOids,
         PostgresVersionCapabilities capabilities,
         CancellationToken cancellationToken)
     {
+        // 親トリガーから自動生成される複製は再作成せず、復元時にPostgreSQLへ任せます。
+        // Leave automatically cloned child triggers to PostgreSQL during restoration.
         var cloneFilter = capabilities.SupportsPartitionTriggerClones ? "AND t.tgparentid = 0" : string.Empty;
         var sql = $"""
             SELECT n.nspname, c.relname, t.tgname, pg_catalog.pg_get_triggerdef(t.oid, true), t.tgrelid
@@ -455,6 +585,14 @@ internal static class CatalogReader
         return result;
     }
 
+    /// <summary>
+    /// <para>対応するオブジェクトの所有者と、関数を識別する引数情報を取得します。</para>
+    /// <para>Reads owners of supported objects and identity arguments for routines.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="selected">選択されたスキーマ名の集合。 Set of selected schema names.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>オブジェクトの所有者一覧を返すタスク。 A task returning object ownership metadata.</returns>
     private static async Task<IReadOnlyList<OwnershipInfo>> ReadOwnershipAsync(
         NpgsqlConnection connection,
         ISet<string> selected,
@@ -515,6 +653,14 @@ internal static class CatalogReader
         return result;
     }
 
+    /// <summary>
+    /// <para>明示されたオブジェクト権限と列権限を展開し、復元用にまとめます。</para>
+    /// <para>Expands explicit object and column ACLs into restoration metadata.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="selected">選択されたスキーマ名の集合。 Set of selected schema names.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>オブジェクト・列の権限一覧を返すタスク。 A task returning object and column access controls.</returns>
     private static async Task<IReadOnlyList<AccessControlInfo>> ReadAccessControlsAsync(
         NpgsqlConnection connection,
         ISet<string> selected,
@@ -582,6 +728,8 @@ internal static class CatalogReader
             ORDER BY o.kind, o.schema_name, o.object_name, o.identity_arguments, o.column_name,
                      acl.grantee, acl.privilege_type
             """;
+        // 空ACLもLEFT JOINの行として残すことで、権限をすべて取り消した状態を復元できます。
+        // Preserve empty ACLs as LEFT JOIN rows so fully revoked privilege states can be restored.
         var rows = new List<(SecuredObjectKind Kind, string? Schema, string Name, string? Arguments, string? Column,
             string Owner, string? Grantee, string? Privilege, bool Grantable)>();
         await using var command = new NpgsqlCommand(sql, connection);
@@ -598,6 +746,8 @@ internal static class CatalogReader
                 !reader.IsDBNull(8) && reader.GetBoolean(8)));
         }
 
+        // 列名と関数の識別引数もグループキーに含め、別の列やオーバーロードを混同しません。
+        // Include columns and routine identity arguments in grouping keys to distinguish columns and overloads.
         return rows
             .GroupBy(x => (x.Kind, x.Schema, x.Name, x.Arguments, x.Column, x.Owner))
             .Select(group => new AccessControlInfo(
@@ -611,13 +761,29 @@ internal static class CatalogReader
             .ToArray();
     }
 
+    /// <summary>
+    /// <para>SQL NULLをnullに変換し、それ以外は指定列の文字列を返します。</para>
+    /// <para>Returns null for SQL NULL or the string at the specified ordinal.</para>
+    /// </summary>
+    /// <param name="reader">テキストまたはカタログ行の読み取り元。 Reader supplying text or catalog rows.</param>
+    /// <param name="ordinal">カタログ行の0始まりの列位置。 Zero-based column ordinal in a catalog row.</param>
+    /// <returns>指定列の文字列、またはSQL NULLの場合はnull。 The column string, or null for SQL NULL.</returns>
     private static string? GetNullableString(NpgsqlDataReader reader, int ordinal) =>
         reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
 
+    /// <summary>
+    /// <para>データベースに限定されない、クラスタ共通のロール設定を取得します。</para>
+    /// <para>Reads cluster-wide role settings that are not limited to a database.</para>
+    /// </summary>
+    /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
+    /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
+    /// <returns>クラスタ共通ロール設定の一覧を返すタスク。 A task returning cluster-wide role settings.</returns>
     private static async Task<IReadOnlyList<RoleSettingInfo>> ReadRoleSettingsAsync(
         NpgsqlConnection connection,
         CancellationToken cancellationToken)
     {
+        // setdatabase=0は全DB共通の設定です。最初の等号で分割し、値中の等号を保持します。
+        // setdatabase=0 identifies cluster-wide settings; split at the first equals sign to preserve equals signs in values.
         const string sql = """
             SELECT r.rolname,
                    pg_catalog.split_part(config.value, '=', 1),

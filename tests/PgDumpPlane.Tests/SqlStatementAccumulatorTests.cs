@@ -1,7 +1,15 @@
 namespace PgDumpPlane.Tests;
 
+/// <summary>
+/// <para>SqlStatementAccumulatorの動作と境界条件を検証します。</para>
+/// <para>Verifies behavior and boundary conditions of SqlStatementAccumulator.</para>
+/// </summary>
 public sealed class SqlStatementAccumulatorTests
 {
+    /// <summary>
+    /// <para>関数本体や文字列内のセミコロンではSQL文を分割しないことを確認します。</para>
+    /// <para>Verifies that semicolons inside routine bodies and strings do not split SQL statements.</para>
+    /// </summary>
     [Fact]
     public void AppendLine_SplitsOnlyTopLevelSemicolons()
     {
@@ -28,6 +36,10 @@ public sealed class SqlStatementAccumulatorTests
         Assert.Contains("E'one\\';two'", statements[1]);
     }
 
+    /// <summary>
+    /// <para>入れ子コメントと引用済み識別子内のセミコロンを正しく扱うことを確認します。</para>
+    /// <para>Checks nested comments and semicolons inside quoted identifiers.</para>
+    /// </summary>
     [Fact]
     public void AppendLine_HandlesNestedBlockCommentsAndQuotedIdentifiers()
     {
@@ -43,6 +55,10 @@ public sealed class SqlStatementAccumulatorTests
         Assert.Contains("'a;b'", statement);
     }
 
+    /// <summary>
+    /// <para>文末のセミコロンがない未完了SQLを拒否することを確認します。</para>
+    /// <para>Verifies rejection of unfinished SQL lacking its terminating semicolon.</para>
+    /// </summary>
     [Fact]
     public void Complete_RejectsUnterminatedStatement()
     {

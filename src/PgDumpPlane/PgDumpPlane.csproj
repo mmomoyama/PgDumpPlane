@@ -1,4 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!-- ライブラリの対象フレームワークとNuGetの識別・公開メタデータです。
+       Defines the library target framework and NuGet identity and publication metadata. -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>PgDumpPlane</AssemblyName>
@@ -13,12 +15,16 @@
     <PackageProjectUrl>https://github.com/mmomoyama/PgDumpPlane</PackageProjectUrl>
     <RepositoryUrl>https://github.com/mmomoyama/PgDumpPlane.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
+    <!-- リポジトリ情報、シンボル、日英XMLドキュメントを公開成果物へ含めます。
+         Include repository metadata, symbols, and bilingual XML documentation in release output. -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Npgsqlで接続とCOPYを行い、READMEをパッケージ直下に配置します。
+         Use Npgsql for connections and COPY and place the README at the package root. -->
     <PackageReference Include="Npgsql" Version="10.0.3" />
     <None Include="../../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>

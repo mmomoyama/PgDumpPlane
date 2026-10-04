@@ -1,4 +1,6 @@
 <Solution>
+  <!-- ライブラリ・実機テスト・Windowsサンプルを一つのソリューションで管理します。
+       Manage the library, integration tests, and Windows sample in one solution. -->
   <Folder Name="/samples/">
     <Project Path="samples/PgDumpPlane.WinForms/PgDumpPlane.WinForms.csproj" />
   </Folder>

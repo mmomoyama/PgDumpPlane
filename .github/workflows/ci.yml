@@ -1,5 +1,7 @@
 name: CI
 
+# pushとプルリクエストの両方で同じ検証を行います。
+# Run the same validation for pushes and pull requests.
 on:
   push:
   pull_request:
@@ -8,11 +10,15 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      # 一つの版が失敗しても他のPostgreSQL版の検証を継続します。
+      # Continue checking other PostgreSQL versions when one fails.
       fail-fast: false
       matrix:
         postgres: ["12", "13", "14", "15", "16", "17", "18", "19beta4"]
 
     services:
+      # 各マトリックスジョブに独立したDBを用意し、起動完了を待ってテストします。
+      # Give each matrix job an isolated database and wait for readiness before testing.
       postgres:
         image: postgres:${{ matrix.postgres }}
         env:
@@ -26,6 +32,8 @@ jobs:
           --health-retries 5
 
     env:
+      # この変数がないと実機テストはDBへ接続せずに戻ります。
+      # Without this variable, integration tests return without connecting to a database.
       PGDUMPPLANE_TEST_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres
 
     steps:
@@ -37,11 +45,15 @@ jobs:
       - name: Test against PostgreSQL ${{ matrix.postgres }}
         shell: bash
         run: |
+          # 出力と終了コードを保存してから、失敗をGitHubの注釈にも反映します。
+          # Capture output and exit status before reporting failures as GitHub annotations.
           set +e
           output=$(dotnet test PgDumpPlane.slnx -c Release --no-restore 2>&1)
           status=$?
           printf '%s\n' "$output"
           if [ "$status" -ne 0 ]; then
+            # 注釈の長さを制限し、ワークフロー命令の特殊文字をエスケープします。
+            # Bound annotation size and escape workflow-command special characters.
             details=$(printf '%s' "$output" | tail -c 12000)
             details=${details//'%'/'%25'}
             details=${details//$'\r'/'%0D'}

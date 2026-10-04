@@ -1,7 +1,15 @@
 namespace PgDumpPlane.Tests;
 
+/// <summary>
+/// <para>RestoreCompatibilityProcessorの動作と境界条件を検証します。</para>
+/// <para>Verifies behavior and boundary conditions of RestoreCompatibilityProcessor.</para>
+/// </summary>
 public sealed class RestoreCompatibilityProcessorTests
 {
+    /// <summary>
+    /// <para>同一バージョンへの復元ではSQLが変更されないことを確認します。</para>
+    /// <para>Verifies that SQL is unchanged when restoring to the same version.</para>
+    /// </summary>
     [Fact]
     public void Process_DoesNothingWhenTargetIsNotOlder()
     {
@@ -12,6 +20,12 @@ public sealed class RestoreCompatibilityProcessorTests
         Assert.Equal(statement, result);
     }
 
+    /// <summary>
+    /// <para>復元先が対応しないタイムアウトと列圧縮設定を除外することを確認します。</para>
+    /// <para>Verifies omission of timeout and compression settings unsupported by the target.</para>
+    /// </summary>
+    /// <param name="targetMajor">復元先DBのメジャーバージョン。 Target database major version.</param>
+    /// <param name="statement">セミコロンで終わる解析済みSQL文。 Parsed SQL statement ending with a semicolon.</param>
     [Theory]
     [InlineData(16, "SET transaction_timeout = 0;\n")]
     [InlineData(13, "ALTER TABLE ONLY public.item ALTER COLUMN value SET COMPRESSION pglz;\n")]
@@ -22,6 +36,10 @@ public sealed class RestoreCompatibilityProcessorTests
         Assert.Null(result);
     }
 
+    /// <summary>
+    /// <para>復元先が対応しないロールのtransaction_timeout設定を除外することを確認します。</para>
+    /// <para>Verifies omission of an unsupported role transaction_timeout setting.</para>
+    /// </summary>
     [Fact]
     public void Process_OmitsUnsupportedRoleSetting()
     {
@@ -31,6 +49,10 @@ public sealed class RestoreCompatibilityProcessorTests
         Assert.Null(result);
     }
 
+    /// <summary>
+    /// <para>PostgreSQL 14向けにUNLOGGEDシーケンスとNULLの一意性構文が変換されることを確認します。</para>
+    /// <para>Verifies sequence and NULL uniqueness syntax conversion for PostgreSQL 14.</para>
+    /// </summary>
     [Fact]
     public void Process_DowngradesSequenceAndUniqueConstraintForPostgres14()
     {
@@ -44,6 +66,10 @@ public sealed class RestoreCompatibilityProcessorTests
         Assert.Equal("ALTER TABLE ONLY public.item ADD CONSTRAINT uq UNIQUE (value);\n", constraint);
     }
 
+    /// <summary>
+    /// <para>NOT NULLと生成列のPostgreSQL 18構文が縮退されることを確認します。</para>
+    /// <para>Verifies downgrade of PostgreSQL 18 NOT NULL and generated-column syntax.</para>
+    /// </summary>
     [Fact]
     public void Process_DowngradesPostgres18ColumnFeatures()
     {
@@ -67,6 +93,10 @@ public sealed class RestoreCompatibilityProcessorTests
             """, result);
     }
 
+    /// <summary>
+    /// <para>PostgreSQL 12向けにパーティション親のトリガーが除外されることを確認します。</para>
+    /// <para>Verifies omission of partitioned-parent triggers for PostgreSQL 12.</para>
+    /// </summary>
     [Fact]
     public void Process_OmitsPartitionedTableTriggerForPostgres12()
     {

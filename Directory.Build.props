@@ -1,8 +1,12 @@
 <Project>
+  <!-- 全プロジェクトで言語機能・null検査・暗黙usingを統一します。
+       Keep language features, nullable analysis, and implicit usings consistent across projects. -->
   <PropertyGroup>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 警告もビルド失敗として扱い、同じ入力から決定的な成果物を生成します。
+         Fail builds on warnings and produce deterministic output from identical inputs. -->
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <Deterministic>true</Deterministic>
   </PropertyGroup>
