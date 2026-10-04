@@ -1,6 +1,8 @@
 bin/
 obj/
 .vs/
+# Visual Studioのユーザー別設定 / Visual Studio per-user settings
+*.user
 TestResults/
 *.nupkg
 *.snupkg
