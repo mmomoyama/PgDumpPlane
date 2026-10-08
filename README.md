@@ -149,6 +149,31 @@ Ownership is enabled by default. It is restored with statements such as
 `ALTER SCHEMA "app" OWNER TO "postgres";` and `ALTER FUNCTION
 "app"."calculate"() OWNER TO "postgres";`.
 
+Object definitions include `pg_dump`-style `Name`, `Type`, `Schema`, and `Owner`
+heading comments. Data sections use `Data for Name` headings. These headings
+are distinct from database descriptions stored with `COMMENT ON`, which are
+not currently dumped. Omitted or inapplicable heading fields use `-`.
+
+Schemas (including selected `public` ownership) precede extensions, then enums
+and routines. Routine overloads are sorted by argument count and argument type
+schema/name, not creation OID. Post-data constraints, indexes, triggers, and
+foreign keys are sorted by schema and object name within each category, matching
+the native tool's type/name priorities. Existing schema filters still apply;
+ordering does not add excluded schemas or extensions to a dump.
+
+As in `pg_dump`, ownership statements follow each object's definition rather
+than appearing at the end of the dump. Views are written before table data;
+tables, views, and sequences are ordered by name with their dependencies first.
+Defaults referencing owned sequences are written after the table and sequence
+definitions. Explicit privileges are restored in the final ACL pass. The
+restoring user needs permission to transfer ownership and continue creating
+objects in the resulting schemas, as with native `pg_dump` output.
+
+To run the optional comparison test against native `pg_dump`, set
+`PGDUMPPLANE_PG_DUMP_PATH` to its executable path along with
+`PGDUMPPLANE_TEST_CONNECTION`. Use a `pg_dump` version compatible with the
+test server.
+
 As with `pg_dump` without `--create`, database-level ownership and privileges
 are not written. A database created by the WinForms sample is owned by the
 connection user.

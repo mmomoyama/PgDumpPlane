@@ -190,7 +190,8 @@ internal static class CatalogReader
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT n.nspname, p.proname, pg_catalog.pg_get_functiondef(p.oid)
+            SELECT n.nspname, p.proname, pg_catalog.pg_get_functiondef(p.oid),
+                   p.prokind::text, pg_catalog.pg_get_function_identity_arguments(p.oid)
             FROM pg_catalog.pg_proc p
             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
             WHERE p.prokind IN ('f', 'p')
@@ -198,7 +199,14 @@ internal static class CatalogReader
                 SELECT 1 FROM pg_catalog.pg_depend d
                 WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
                   AND d.objid = p.oid AND d.deptype = 'e')
-            ORDER BY n.nspname, p.proname, p.oid
+            -- pg_dumpは作成OIDではなく、引数数と引数型のスキーマ・名前を比較します。
+            -- pg_dump compares argument counts and type schema/name, rather than creation OIDs.
+            ORDER BY n.nspname COLLATE "C", p.proname COLLATE "C", p.pronargs,
+                     ARRAY(SELECT tn.nspname::text || '.' || t.typname::text
+                           FROM unnest(p.proargtypes::oid[]) WITH ORDINALITY AS args(type_oid, position)
+                           JOIN pg_catalog.pg_type t ON t.oid = args.type_oid
+                           JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
+                           ORDER BY args.position) COLLATE "C", p.oid
             """;
         var result = new List<RoutineInfo>();
         await using var command = new NpgsqlCommand(sql, connection);
@@ -207,7 +215,9 @@ internal static class CatalogReader
         {
             var schema = reader.GetString(0);
             if (selected.Contains(schema))
-                result.Add(new(schema, reader.GetString(1), reader.GetString(2)));
+                result.Add(new(schema, reader.GetString(1), reader.GetString(2),
+                    reader.GetString(3) == "p" ? SecuredObjectKind.Procedure : SecuredObjectKind.Function,
+                    reader.GetString(4)));
         }
         return result;
     }
@@ -363,7 +373,14 @@ internal static class CatalogReader
                    pg_catalog.pg_get_expr(ad.adbin, ad.adrelid), a.attidentity::text, a.attgenerated::text,
                    CASE WHEN a.attcollation <> t.typcollation
                         THEN pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(co.collname) END,
-                   {compressionExpression}, {notNullFields}
+                   {compressionExpression}, {notNullFields},
+                   ARRAY(SELECT DISTINCT d.refobjid
+                         FROM pg_catalog.pg_depend d
+                         JOIN pg_catalog.pg_class referenced ON referenced.oid = d.refobjid
+                         WHERE d.classid = 'pg_catalog.pg_attrdef'::pg_catalog.regclass
+                           AND d.objid = ad.oid
+                           AND d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                           AND referenced.relkind = 'S')
             FROM pg_catalog.pg_attribute a
             JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
             LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
@@ -388,7 +405,10 @@ internal static class CatalogReader
             var generatedText = reader.GetString(6);
             list.Add(new(reader.GetString(1), reader.GetString(2), reader.GetBoolean(3), GetNullableString(reader, 4),
                 identityText.Length == 0 ? '\0' : identityText[0], generatedText.Length == 0 ? '\0' : generatedText[0],
-                GetNullableString(reader, 7), GetNullableString(reader, 8), GetNullableString(reader, 9), reader.GetBoolean(10)));
+                GetNullableString(reader, 7), GetNullableString(reader, 8), GetNullableString(reader, 9), reader.GetBoolean(10))
+            {
+                SequenceDependencies = reader.GetFieldValue<uint[]>(11)
+            });
         }
         foreach (var pair in mutable)
             result.Add(pair.Key, pair.Value);
@@ -440,8 +460,8 @@ internal static class CatalogReader
     }
 
     /// <summary>
-    /// <para>リライトルールの依存関係から、選択されたビュー同士の参照を取得します。</para>
-    /// <para>Reads references between selected views through rewrite-rule dependencies.</para>
+    /// <para>リライトルールからビューの依存先テーブル・ビュー・シーケンスを取得します。</para>
+    /// <para>Reads view dependencies on tables, views, and sequences through rewrite rules.</para>
     /// </summary>
     /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
     /// <param name="selectedOids">選択されたオブジェクトOIDの集合。 Set of selected object OIDs.</param>
@@ -457,8 +477,9 @@ internal static class CatalogReader
             FROM pg_catalog.pg_rewrite rw
             JOIN pg_catalog.pg_depend d
               ON d.classid = 'pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid = rw.oid
+             AND d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
             JOIN pg_catalog.pg_class dependency ON dependency.oid = d.refobjid
-            WHERE dependency.relkind = 'v' AND rw.ev_class <> d.refobjid
+            WHERE dependency.relkind IN ('r', 'p', 'v', 'S') AND rw.ev_class <> d.refobjid
             """;
         var mutable = new Dictionary<uint, List<uint>>();
         await using var command = new NpgsqlCommand(sql, connection);
@@ -467,7 +488,7 @@ internal static class CatalogReader
         {
             var view = reader.GetFieldValue<uint>(0);
             var dependency = reader.GetFieldValue<uint>(1);
-            if (!selectedOids.Contains(view) || !selectedOids.Contains(dependency))
+            if (!selectedOids.Contains(view))
                 continue;
             if (!mutable.TryGetValue(view, out var list))
                 mutable.Add(view, list = []);

@@ -1,4 +1,6 @@
 using System.Text;
+using System.Diagnostics;
+using System.Text.RegularExpressions;
 using Npgsql;
 
 namespace PgDumpPlane.Tests;
@@ -9,6 +11,222 @@ namespace PgDumpPlane.Tests;
 /// </summary>
 public sealed class PostgresIntegrationTests
 {
+    /// <summary>
+    /// <para>同じDBのpg_dumpとCREATE・OWNER・COPYの並びを比較し、復元も確認します。</para>
+    /// <para>Compares CREATE, OWNER, and COPY order with pg_dump on the same database and verifies restoration.</para>
+    /// </summary>
+    /// <returns>比較と復元の検証完了を表すタスク。 A task representing completion of comparison and restore checks.</returns>
+    [Fact]
+    public async Task DumpAsync_MatchesNativePgDumpDefinitionAndOwnerOrder()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("PGDUMPPLANE_TEST_CONNECTION");
+        var pgDumpPath = Environment.GetEnvironmentVariable("PGDUMPPLANE_PG_DUMP_PATH");
+        // 標準ツールとの比較は明示された実行ファイルを使う場合にだけ実施します。
+        // Run native comparisons only when an executable path is explicitly configured.
+        if (string.IsNullOrWhiteSpace(connectionString) || string.IsNullOrWhiteSpace(pgDumpPath))
+            return;
+
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var schema = $"dump_order_{Guid.NewGuid():N}";
+        var quoted = SqlText.Identifier(schema);
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        try
+        {
+            await using (var setup = new NpgsqlCommand($"""
+                CREATE SCHEMA {quoted};
+                CREATE TYPE {quoted}.mood AS ENUM ('happy', 'sad');
+                CREATE FUNCTION {quoted}.echo(value text) RETURNS text LANGUAGE sql AS 'SELECT value';
+                CREATE FUNCTION {quoted}.echo(value integer) RETURNS integer LANGUAGE sql AS 'SELECT value';
+                CREATE PROCEDURE {quoted}.refresh() LANGUAGE sql AS 'SELECT 1';
+                CREATE FUNCTION {quoted}.fuc_trn_last_update_adserversetting() RETURNS integer LANGUAGE sql AS 'SELECT 1';
+                CREATE TABLE {quoted}.z_table(id serial PRIMARY KEY, value text);
+                CREATE VIEW {quoted}.a_view AS SELECT id, value FROM {quoted}.z_table;
+                CREATE VIEW {quoted}.a_dependent_view AS SELECT id FROM {quoted}.a_view;
+                CREATE TABLE {quoted}.b_identity(id integer GENERATED ALWAYS AS IDENTITY, value integer);
+                CREATE SEQUENCE {quoted}.a_free;
+                CREATE SEQUENCE {quoted}.z_late_sequence;
+                CREATE TABLE {quoted}.a_uses_late_sequence(id bigint DEFAULT nextval('{schema}.z_late_sequence'));
+                ALTER TABLE {quoted}.z_table ADD CONSTRAINT a_unique UNIQUE (value);
+                ALTER TABLE {quoted}.b_identity ADD CONSTRAINT z_unique UNIQUE (value);
+                CREATE INDEX a_index ON {quoted}.z_table(value);
+                CREATE INDEX z_index ON {quoted}.b_identity(value);
+                CREATE FUNCTION {quoted}.trigger_noop() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+                CREATE TRIGGER a_trigger BEFORE INSERT ON {quoted}.z_table FOR EACH ROW EXECUTE FUNCTION {quoted}.trigger_noop();
+                CREATE TRIGGER z_trigger BEFORE INSERT ON {quoted}.b_identity FOR EACH ROW EXECUTE FUNCTION {quoted}.trigger_noop();
+                """, connection))
+                await setup.ExecuteNonQueryAsync(cancellationToken);
+            await using (var data = new NpgsqlCommand($"""
+                INSERT INTO {quoted}.z_table(value) VALUES ('preserved');
+                INSERT INTO {quoted}.a_uses_late_sequence DEFAULT VALUES;
+                INSERT INTO {quoted}.b_identity(value) VALUES (42);
+                GRANT SELECT ON TABLE {quoted}.z_table TO PUBLIC;
+                """, connection))
+                await data.ExecuteNonQueryAsync(cancellationToken);
+
+            var settings = new NpgsqlConnectionStringBuilder(connectionString);
+            var start = new ProcessStartInfo(pgDumpPath)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            foreach (var argument in new[]
+            {
+                "--host", settings.Host!, "--port", settings.Port.ToString(),
+                "--username", settings.Username!, "--dbname", settings.Database!,
+                "--schema", schema, "--no-comments", "--no-password"
+            })
+                start.ArgumentList.Add(argument);
+            start.Environment["PGPASSWORD"] = settings.Password ?? string.Empty;
+            using var process = Process.Start(start)!;
+            var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken);
+            var native = await stdout;
+            Assert.True(process.ExitCode == 0, await stderr);
+
+            var options = new PgDumpOptions { UsePsqlRestrict = false };
+            options.IncludeSchemas.Add(schema);
+            using var writer = new StringWriter();
+            await new PostgresPlainTextDumper().DumpAsync(connection, writer, options, cancellationToken);
+            var script = writer.ToString();
+
+            Assert.Equal(DefinitionAndOwnerOrder(native), DefinitionAndOwnerOrder(script));
+            Assert.Equal(PostDataHeadingOrder(native), PostDataHeadingOrder(script));
+            // 同じDBの標準pg_dumpと、引数なし関数およびデータ見出しを直接比較します。
+            // Compare no-argument routine and data headings directly with native pg_dump on the same DB.
+            foreach (var heading in Regex.Matches(native,
+                         @"^-- (?:Name: (?:fuc_trn_last_update_adserversetting\(\)|refresh\(\)|mood|z_table|a_view|a_free)|Data for Name: z_table);[^\r\n]+",
+                         RegexOptions.Multiline).Select(match => match.Value))
+                Assert.Contains(heading, script);
+            Assert.Contains($"-- Name: fuc_trn_last_update_adserversetting(); Type: FUNCTION; Schema: {schema}; Owner: {settings.Username}", script);
+            Assert.True(script.IndexOf("GRANT SELECT ON TABLE", StringComparison.Ordinal) >
+                script.LastIndexOf("COPY ", StringComparison.Ordinal));
+            options.IncludeOwnership = false;
+            using var noOwnerWriter = new StringWriter();
+            await new PostgresPlainTextDumper().DumpAsync(connection, noOwnerWriter, options, cancellationToken);
+            Assert.DoesNotContain(" OWNER TO ", noOwnerWriter.ToString());
+            await using (var drop = new NpgsqlCommand($"DROP SCHEMA {quoted} CASCADE", connection))
+                await drop.ExecuteNonQueryAsync(cancellationToken);
+            await new PostgresPlainTextRestorer().RestoreAsync(
+                connection, new StringReader(script), cancellationToken: cancellationToken);
+            await using var verify = new NpgsqlCommand($"""
+                SELECT (SELECT value FROM {quoted}.z_table WHERE id = 1) = 'preserved'
+                   AND (SELECT id FROM {quoted}.a_uses_late_sequence) = 1
+                   AND (SELECT value FROM {quoted}.b_identity WHERE id = 1) = 42
+                   AND (SELECT id FROM {quoted}.a_dependent_view) = 1
+                """, connection);
+            Assert.True((bool)(await verify.ExecuteScalarAsync(cancellationToken))!);
+            await using var next = new NpgsqlCommand(
+                $"INSERT INTO {quoted}.z_table(value) VALUES ('next') RETURNING id", connection);
+            Assert.Equal(2, await next.ExecuteScalarAsync(cancellationToken));
+        }
+        finally
+        {
+            await using var cleanup = new NpgsqlCommand($"DROP SCHEMA IF EXISTS {quoted} CASCADE", connection);
+            await cleanup.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// <para>テーブル名順とオブジェクト名順が逆になる制約・索引・トリガーの出力順を抽出します。</para>
+    /// <para>Extracts constraint, index, and trigger order where table and object name ordering disagree.</para>
+    /// </summary>
+    /// <param name="script">比較するSQL。 SQL to compare.</param>
+    /// <returns>対象の見出し順。 Selected heading order.</returns>
+    private static string[] PostDataHeadingOrder(string script) =>
+        Regex.Matches(script, @"^-- Name: [^\r\n]+; Type: (?:CONSTRAINT|INDEX|TRIGGER);[^\r\n]+",
+                RegexOptions.Multiline).Select(match => match.Value).ToArray();
+
+    /// <summary>
+    /// <para>隔離した一時DBの全体ダンプで、public・拡張機能・型の順を標準pg_dumpと比較します。</para>
+    /// <para>Compares public, extension, and type ordering with native pg_dump in an isolated temporary database.</para>
+    /// </summary>
+    /// <returns>出力順検証を表すタスク。 A task representing ordering verification.</returns>
+    [Fact]
+    public async Task DumpAsync_MatchesNativePublicAndExtensionOrder()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("PGDUMPPLANE_TEST_CONNECTION");
+        var pgDumpPath = Environment.GetEnvironmentVariable("PGDUMPPLANE_PG_DUMP_PATH");
+        if (string.IsNullOrWhiteSpace(connectionString) || string.IsNullOrWhiteSpace(pgDumpPath))
+            return;
+
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var database = $"dump_extensions_{Guid.NewGuid():N}";
+        var settings = new NpgsqlConnectionStringBuilder(connectionString) { Database = database, Pooling = false };
+        await using var admin = new NpgsqlConnection(connectionString);
+        await admin.OpenAsync(cancellationToken);
+        await using (var create = new NpgsqlCommand($"CREATE DATABASE {SqlText.Identifier(database)} TEMPLATE template0", admin))
+            await create.ExecuteNonQueryAsync(cancellationToken);
+        try
+        {
+            await using var connection = new NpgsqlConnection(settings.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using (var setup = new NpgsqlCommand("""
+                CREATE SCHEMA ciserver;
+                ALTER SCHEMA public OWNER TO CURRENT_USER;
+                CREATE EXTENSION pgcrypto WITH SCHEMA ciserver;
+                CREATE TYPE ciserver.mood AS ENUM ('happy');
+                """, connection))
+                await setup.ExecuteNonQueryAsync(cancellationToken);
+            var start = new ProcessStartInfo(pgDumpPath)
+            {
+                RedirectStandardOutput = true, RedirectStandardError = true,
+                UseShellExecute = false, CreateNoWindow = true
+            };
+            // publicの所有者を既定から変更し、全体pg_dumpでも見出しと所有者変更が出る条件にします。
+            // A nondefault public owner makes native whole-database pg_dump emit its heading and ownership.
+            foreach (var argument in new[] { "--host", settings.Host!, "--port", settings.Port.ToString(),
+                         "--username", settings.Username!, "--dbname", database,
+                         "--no-comments", "--no-password" })
+                start.ArgumentList.Add(argument);
+            start.Environment["PGPASSWORD"] = settings.Password ?? string.Empty;
+            using var process = Process.Start(start)!;
+            var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken);
+            var native = await stdout;
+            Assert.True(process.ExitCode == 0, await stderr);
+            using var writer = new StringWriter();
+            var options = new PgDumpOptions { UsePsqlRestrict = false };
+            await new PostgresPlainTextDumper().DumpAsync(connection, writer,
+                options, cancellationToken);
+            var script = writer.ToString();
+            Assert.Equal(DefinitionAndOwnerOrder(native), DefinitionAndOwnerOrder(script));
+            Assert.Contains($"-- Name: public; Type: SCHEMA; Schema: -; Owner: {settings.Username}\n--\n\n" +
+                $"ALTER SCHEMA \"public\" OWNER TO {SqlText.Identifier(settings.Username!)};", script);
+            Assert.Contains("-- Name: pgcrypto; Type: EXTENSION; Schema: -; Owner: -\n--\n\n" +
+                "CREATE EXTENSION IF NOT EXISTS \"pgcrypto\" WITH SCHEMA \"ciserver\";", script);
+            Assert.True(script.IndexOf("ALTER SCHEMA \"public\"", StringComparison.Ordinal) <
+                script.IndexOf("CREATE EXTENSION", StringComparison.Ordinal));
+            Assert.True(script.IndexOf("CREATE EXTENSION", StringComparison.Ordinal) <
+                script.IndexOf("CREATE TYPE", StringComparison.Ordinal));
+        }
+        finally
+        {
+            // 作成した一時DBだけを削除します。既存DBの内容は変更しません。
+            // Remove only the temporary database created above; leave existing database contents untouched.
+            await using var cleanup = new NpgsqlCommand($"DROP DATABASE {SqlText.Identifier(database)}", admin);
+            await cleanup.ExecuteNonQueryAsync(CancellationToken.None);
+        }
+    }
+
+    /// <summary>
+    /// <para>単純名のテスト対象について、引用符とOR REPLACEの差を除いた順序を抽出します。</para>
+    /// <para>Extracts order for simple fixture names, ignoring quoting and OR REPLACE differences.</para>
+    /// </summary>
+    /// <param name="script">比較するダンプSQL。 Dump SQL to compare.</param>
+    /// <returns>CREATE・OWNER・COPYの出現順。 CREATE, OWNER, and COPY entries in appearance order.</returns>
+    private static string[] DefinitionAndOwnerOrder(string script) =>
+        Regex.Matches(script,
+            @"^(CREATE (?:OR REPLACE )?(?:EXTENSION IF NOT EXISTS|SCHEMA|TYPE|FUNCTION|PROCEDURE|TABLE|VIEW|SEQUENCE) [^\s(]+|ALTER (?:SCHEMA|TYPE|FUNCTION|PROCEDURE|TABLE|VIEW|SEQUENCE) [^\r\n]+ OWNER TO [^\r\n]+;|COPY [^\s(]+)",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant)
+            .Select(match => match.Value.Replace("\"", string.Empty, StringComparison.Ordinal)
+                .Replace("OR REPLACE ", string.Empty, StringComparison.Ordinal).TrimEnd(';'))
+            .ToArray();
+
     /// <summary>
     /// <para>新しいバージョンの構文を実サーバーに復元し、生成列の値を確認します。</para>
     /// <para>Restores newer-version syntax to a live server and verifies the generated value.</para>

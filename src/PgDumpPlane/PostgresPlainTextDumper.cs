@@ -180,8 +180,8 @@ public sealed class PostgresPlainTextDumper
 
             if (options.IncludeData)
             {
-                await WriteTableDataAsync(connection, writer, snapshot.Tables, options, cancellationToken).ConfigureAwait(false);
-                await WriteSequenceDataAsync(connection, writer, snapshot.Sequences, cancellationToken).ConfigureAwait(false);
+                await WriteTableDataAsync(connection, writer, snapshot, options, cancellationToken).ConfigureAwait(false);
+                await WriteSequenceDataAsync(connection, writer, snapshot, cancellationToken).ConfigureAwait(false);
             }
 
             if (options.IncludeSchema)
@@ -281,49 +281,133 @@ public sealed class PostgresPlainTextDumper
     /// <param name="writer">SQLまたはテキストの出力先。 Destination for SQL or text output.</param>
     /// <param name="snapshot">出力対象のカタログ情報。 Catalog metadata to write.</param>
     /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
-    private static async Task WritePreDataAsync(TextWriter writer, CatalogSnapshot snapshot)
+    internal static async Task WritePreDataAsync(TextWriter writer, CatalogSnapshot snapshot)
     {
         await SectionAsync(writer, "PRE-DATA").ConfigureAwait(false);
-        foreach (var schema in snapshot.Schemas.Where(x => x.Name != "public"))
-            await writer.WriteAsync($"CREATE SCHEMA {SqlText.Identifier(schema.Name)};\n\n").ConfigureAwait(false);
+        var owners = snapshot.Ownership.ToDictionary(x => (x.Kind, x.Schema, x.Name, x.IdentityArguments));
+        foreach (var schema in snapshot.Schemas.OrderBy(x => x.Name, StringComparer.Ordinal))
+        {
+            await WriteObjectHeaderAsync(writer, schema.Name, "SCHEMA", null,
+                owners.GetValueOrDefault((SecuredObjectKind.Schema, schema.Name, schema.Name, null))?.Owner).ConfigureAwait(false);
+            if (schema.Name != "public")
+                await writer.WriteAsync($"CREATE SCHEMA {SqlText.Identifier(schema.Name)};\n\n").ConfigureAwait(false);
+            await WriteOwnershipAsync(writer,
+                owners.GetValueOrDefault((SecuredObjectKind.Schema, schema.Name, schema.Name, null))).ConfigureAwait(false);
+        }
 
         // VERSIONを固定しないことで、復元先にインストール可能な既定バージョンを使用します。
         // Omit VERSION to use the default extension version available on the destination.
-        foreach (var extension in snapshot.Extensions)
+        foreach (var extension in snapshot.Extensions.OrderBy(x => x.Name, StringComparer.Ordinal))
         {
+            await WriteObjectHeaderAsync(writer, extension.Name, "EXTENSION", null, null).ConfigureAwait(false);
             await writer.WriteAsync($"CREATE EXTENSION IF NOT EXISTS {SqlText.Identifier(extension.Name)} WITH SCHEMA {SqlText.Identifier(extension.Schema)};\n\n").ConfigureAwait(false);
         }
 
-        foreach (var item in snapshot.Enums)
+        foreach (var item in snapshot.Enums.OrderBy(x => x.Schema, StringComparer.Ordinal)
+                     .ThenBy(x => x.Name, StringComparer.Ordinal))
         {
+            await WriteObjectHeaderAsync(writer, item.Name, "TYPE", item.Schema,
+                owners.GetValueOrDefault((SecuredObjectKind.Type, item.Schema, item.Name, null))?.Owner).ConfigureAwait(false);
             var labels = string.Join(", ", item.Labels.Select(SqlText.Literal));
             await writer.WriteAsync($"CREATE TYPE {SqlText.Qualified(item.Schema, item.Name)} AS ENUM ({labels});\n\n").ConfigureAwait(false);
+            await WriteOwnershipAsync(writer,
+                owners.GetValueOrDefault((SecuredObjectKind.Type, item.Schema, item.Name, null))).ConfigureAwait(false);
         }
 
         foreach (var routine in snapshot.Routines)
         {
+            await WriteObjectHeaderAsync(writer, $"{routine.Name}({routine.IdentityArguments})",
+                OwnershipKeyword(routine.Kind), routine.Schema,
+                owners.GetValueOrDefault((routine.Kind, routine.Schema, routine.Name, routine.IdentityArguments))?.Owner).ConfigureAwait(false);
             var definition = routine.Definition.TrimEnd();
             await writer.WriteAsync(definition).ConfigureAwait(false);
             if (!definition.EndsWith(';'))
                 await writer.WriteAsync(';').ConfigureAwait(false);
             await writer.WriteAsync("\n\n").ConfigureAwait(false);
+            await WriteOwnershipAsync(writer,
+                owners.GetValueOrDefault((routine.Kind, routine.Schema, routine.Name, routine.IdentityArguments))).ConfigureAwait(false);
         }
 
-        // IDENTITY用シーケンスは列定義によって作成されるため、独立したCREATEを出力しません。
-        // Identity columns create their own sequences, so do not emit standalone CREATE statements for them.
-        foreach (var sequence in snapshot.Sequences.Where(x => !x.IsIdentity))
-            await WriteSequenceAsync(writer, sequence).ConfigureAwait(false);
+        // SERIALの既定値は後置し、テーブル→所有シーケンス→OWNED BY→DEFAULTの順を保ちます。
+        // Defer SERIAL defaults to preserve table, owned sequence, OWNED BY, then DEFAULT order.
+        var ownedSequences = snapshot.Sequences.Where(x => !x.IsIdentity && x.OwnedTableName is not null)
+            .Select(x => x.Oid).ToHashSet();
+        var deferredDefaults = snapshot.Tables.SelectMany(table => table.Columns
+            .Where(column => column.Generated == '\0' && column.Identity == '\0' &&
+                column.DefaultExpression is not null && column.SequenceDependencies.Any(ownedSequences.Contains))
+            .Select(column => (Table: table, Column: column))).ToArray();
+        var deferredColumns = deferredDefaults.Select(x => (x.Table.Oid, x.Column.Name)).ToHashSet();
 
-        foreach (var table in TopologicalTables(snapshot.Tables))
-            await WriteTableAsync(writer, table).ConfigureAwait(false);
-
-        // OWNED BYはテーブル作成後に設定し、まだ存在しない所有列への参照を避けます。
-        // Apply OWNED BY after table creation to avoid referencing a column that does not exist yet.
-        foreach (var sequence in snapshot.Sequences.Where(x => !x.IsIdentity && x.OwnedTableName is not null))
+        foreach (var relation in OrderRelations(snapshot, deferredColumns))
         {
-            await writer.WriteAsync($"ALTER SEQUENCE {SqlText.Qualified(sequence.Schema, sequence.Name)} OWNED BY " +
-                $"{SqlText.Qualified(sequence.OwnedTableSchema!, sequence.OwnedTableName!)}.{SqlText.Identifier(sequence.OwnedColumn!)};\n\n").ConfigureAwait(false);
+            if (relation.Table is { } table)
+            {
+                await WriteObjectHeaderAsync(writer, table.Name, "TABLE", table.Schema,
+                    owners.GetValueOrDefault((SecuredObjectKind.Table, table.Schema, table.Name, null))?.Owner).ConfigureAwait(false);
+                var definition = table with
+                {
+                    Columns = table.Columns.Select(column => deferredColumns.Contains((table.Oid, column.Name))
+                        ? column with { DefaultExpression = null } : column).ToArray()
+                };
+                await WriteTableAsync(writer, definition).ConfigureAwait(false);
+                await WriteOwnershipAsync(writer,
+                    owners.GetValueOrDefault((SecuredObjectKind.Table, table.Schema, table.Name, null))).ConfigureAwait(false);
+            }
+            else if (relation.Sequence is { } sequence)
+            {
+                var owner = owners.GetValueOrDefault((SecuredObjectKind.Sequence, sequence.Schema, sequence.Name, null))?.Owner;
+                await WriteObjectHeaderAsync(writer, sequence.Name, "SEQUENCE", sequence.Schema, owner).ConfigureAwait(false);
+                await WriteSequenceAsync(writer, sequence).ConfigureAwait(false);
+                await WriteOwnershipAsync(writer,
+                    owners.GetValueOrDefault((SecuredObjectKind.Sequence, sequence.Schema, sequence.Name, null))).ConfigureAwait(false);
+                if (sequence.OwnedTableName is not null)
+                {
+                    await WriteObjectHeaderAsync(writer, sequence.Name, "SEQUENCE OWNED BY", sequence.Schema, owner).ConfigureAwait(false);
+                    await writer.WriteAsync($"ALTER SEQUENCE {SqlText.Qualified(sequence.Schema, sequence.Name)} OWNED BY " +
+                        $"{SqlText.Qualified(sequence.OwnedTableSchema!, sequence.OwnedTableName)}.{SqlText.Identifier(sequence.OwnedColumn!)};\n\n").ConfigureAwait(false);
+                }
+            }
+            else if (relation.View is { } view)
+            {
+                await WriteObjectHeaderAsync(writer, view.Name, "VIEW", view.Schema,
+                    owners.GetValueOrDefault((SecuredObjectKind.View, view.Schema, view.Name, null))?.Owner).ConfigureAwait(false);
+                var options = string.IsNullOrWhiteSpace(view.Options) ? string.Empty : $" WITH ({view.Options})";
+                await writer.WriteAsync($"CREATE VIEW {SqlText.Qualified(view.Schema, view.Name)}{options} AS\n{view.Definition.TrimEnd()};\n\n").ConfigureAwait(false);
+                await WriteOwnershipAsync(writer,
+                    owners.GetValueOrDefault((SecuredObjectKind.View, view.Schema, view.Name, null))).ConfigureAwait(false);
+            }
         }
+
+        foreach (var (table, column) in deferredDefaults.OrderBy(x => x.Table.Schema, StringComparer.Ordinal)
+                     .ThenBy(x => x.Table.Name, StringComparer.Ordinal))
+        {
+            await WriteObjectHeaderAsync(writer, $"{table.Name} {column.Name}", "DEFAULT", table.Schema,
+                owners.GetValueOrDefault((SecuredObjectKind.Table, table.Schema, table.Name, null))?.Owner).ConfigureAwait(false);
+            await writer.WriteAsync($"ALTER TABLE ONLY {SqlText.Qualified(table.Schema, table.Name)} " +
+                $"ALTER COLUMN {SqlText.Identifier(column.Name)} SET DEFAULT {column.DefaultExpression};\n\n").ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// <para>pg_dump形式のオブジェクト見出しを出力し、改行によるコメント外へのSQL混入を防ぎます。</para>
+    /// <para>Writes a pg_dump-style object heading, preventing embedded newlines from escaping the SQL comment.</para>
+    /// </summary>
+    /// <param name="writer">出力先。 Output writer.</param>
+    /// <param name="name">オブジェクトの表示名。 Object display name.</param>
+    /// <param name="type">オブジェクト種別。 Object type.</param>
+    /// <param name="schema">スキーマ名。nullは適用なし。 Schema name, or null when not applicable.</param>
+    /// <param name="owner">所有者名。nullは所有者出力なし。 Owner name, or null when ownership is omitted.</param>
+    /// <param name="data">データ用見出しかどうか。 Whether this is a data heading.</param>
+    /// <returns>出力完了を表すタスク。 A task representing output completion.</returns>
+    internal static Task WriteObjectHeaderAsync(
+        TextWriter writer, string name, string type, string? schema, string? owner, bool data = false)
+    {
+        // PostgreSQLのsanitize_lineと同様、名前内の改行を空白に変えます。
+        // Like PostgreSQL's sanitize_line, replace line breaks in names with spaces.
+        static string SingleLine(string? value) => string.IsNullOrEmpty(value) ? "-" :
+            value.Replace('\r', ' ').Replace('\n', ' ');
+        return writer.WriteAsync($"--\n-- {(data ? "Data for " : string.Empty)}Name: {SingleLine(name)}; " +
+            $"Type: {SingleLine(type)}; Schema: {SingleLine(schema)}; Owner: {SingleLine(owner)}\n--\n\n");
     }
 
     /// <summary>
@@ -442,20 +526,24 @@ public sealed class PostgresPlainTextDumper
     /// </summary>
     /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
     /// <param name="writer">SQLまたはテキストの出力先。 Destination for SQL or text output.</param>
-    /// <param name="tables">出力対象テーブル一覧。 Tables selected for output.</param>
+    /// <param name="snapshot">テーブルと所有者を含むカタログ情報。 Catalog metadata including tables and owners.</param>
     /// <param name="options">ダンプ設定。公開APIではnullの場合に既定値を使用します。 Dump options; null uses defaults in public APIs.</param>
     /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
     /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
     private static async Task WriteTableDataAsync(
         NpgsqlConnection connection,
         TextWriter writer,
-        IReadOnlyList<TableInfo> tables,
+        CatalogSnapshot snapshot,
         PgDumpOptions options,
         CancellationToken cancellationToken)
     {
         await SectionAsync(writer, "DATA").ConfigureAwait(false);
-        foreach (var table in tables.Where(x => x.Kind == 'r' && (options.IncludeUnloggedTableData || !x.Unlogged)))
+        foreach (var table in snapshot.Tables.Where(x => x.Kind == 'r' && (options.IncludeUnloggedTableData || !x.Unlogged))
+                     .OrderBy(x => x.Schema, StringComparer.Ordinal).ThenBy(x => x.Name, StringComparer.Ordinal))
         {
+            var owner = snapshot.Ownership.FirstOrDefault(x => x.Kind == SecuredObjectKind.Table &&
+                x.Schema == table.Schema && x.Name == table.Name)?.Owner;
+            await WriteObjectHeaderAsync(writer, table.Name, "TABLE DATA", table.Schema, owner, data: true).ConfigureAwait(false);
             if (options.DataFormat == PgDumpDataFormat.Inserts)
                 await WriteTableInsertsAsync(connection, writer, table, cancellationToken).ConfigureAwait(false);
             else
@@ -487,7 +575,7 @@ public sealed class PostgresPlainTextDumper
         var columnList = string.Join(", ", columns.Select(SqlText.Identifier));
         var qualified = SqlText.Qualified(table.Schema, table.Name);
         var copy = $"COPY {qualified} ({columnList}) TO STDOUT";
-        await writer.WriteAsync($"-- Data for Name: {table.Name}; Schema: {table.Schema}\n\nCOPY {qualified} ({columnList}) FROM stdin;\n").ConfigureAwait(false);
+        await writer.WriteAsync($"COPY {qualified} ({columnList}) FROM stdin;\n").ConfigureAwait(false);
         await using var reader = await connection.BeginTextExportAsync(copy, cancellationToken).ConfigureAwait(false);
         await CopyTextAsync(reader, writer, cancellationToken).ConfigureAwait(false);
         await writer.WriteAsync("\\.\n\n").ConfigureAwait(false);
@@ -516,7 +604,6 @@ public sealed class PostgresPlainTextDumper
             ? "1"
             : string.Join(", ", columns.Select(x => $"pg_catalog.quote_nullable({SqlText.Identifier(x.Name)})"));
 
-        await writer.WriteAsync($"-- Data for Name: {table.Name}; Schema: {table.Schema}\n\n").ConfigureAwait(false);
         await using var command = new NpgsqlCommand($"SELECT {selectList} FROM {qualified}", connection);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 
@@ -554,17 +641,21 @@ public sealed class PostgresPlainTextDumper
     /// </summary>
     /// <param name="connection">処理に使用するNpgsql接続。 Npgsql connection used by the operation.</param>
     /// <param name="writer">SQLまたはテキストの出力先。 Destination for SQL or text output.</param>
-    /// <param name="sequences">状態を出力するシーケンス一覧。 Sequences whose state is written.</param>
+    /// <param name="snapshot">シーケンスと所有者を含むカタログ情報。 Catalog metadata including sequences and owners.</param>
     /// <param name="cancellationToken">処理の中止を通知するトークン。 Token used to request cancellation.</param>
     /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
     private static async Task WriteSequenceDataAsync(
         NpgsqlConnection connection,
         TextWriter writer,
-        IReadOnlyList<SequenceInfo> sequences,
+        CatalogSnapshot snapshot,
         CancellationToken cancellationToken)
     {
-        foreach (var sequence in sequences)
+        foreach (var sequence in snapshot.Sequences.OrderBy(x => x.Schema, StringComparer.Ordinal)
+                     .ThenBy(x => x.Name, StringComparer.Ordinal))
         {
+            var owner = snapshot.Ownership.FirstOrDefault(x => x.Kind == SecuredObjectKind.Sequence &&
+                x.Schema == sequence.Schema && x.Name == sequence.Name)?.Owner;
+            await WriteObjectHeaderAsync(writer, sequence.Name, "SEQUENCE SET", sequence.Schema, owner).ConfigureAwait(false);
             var qualified = SqlText.Qualified(sequence.Schema, sequence.Name);
             await using var command = new NpgsqlCommand($"SELECT last_value, is_called FROM {qualified}", connection);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -580,8 +671,8 @@ public sealed class PostgresPlainTextDumper
     }
 
     /// <summary>
-    /// <para>データ投入後に制約、索引、ビュー、トリガーを依存順に出力します。</para>
-    /// <para>Writes constraints, indexes, views, and triggers after data loading.</para>
+    /// <para>データ投入後に制約、索引、トリガー、外部キーを出力します。</para>
+    /// <para>Writes constraints, indexes, triggers, and foreign keys after data loading.</para>
     /// </summary>
     /// <param name="writer">SQLまたはテキストの出力先。 Destination for SQL or text output.</param>
     /// <param name="snapshot">出力対象のカタログ情報。 Catalog metadata to write.</param>
@@ -593,16 +684,28 @@ public sealed class PostgresPlainTextDumper
             .Where(x => x.Kind == 'p')
             .Select(x => (x.Schema, x.Name))
             .ToHashSet();
+        var tableOwners = snapshot.Ownership.Where(x => x.Kind == SecuredObjectKind.Table)
+            .ToDictionary(x => (x.Schema, x.Name), x => x.Owner);
         // 参照される主キー・一意制約と索引を先に作り、外部キーを後から追加します。
         // Create referenced primary and unique keys and indexes before adding foreign keys.
-        foreach (var constraint in snapshot.Constraints.Where(x => x.Type != 'f'))
+        // pg_dumpは同じ種別内でスキーマ・オブジェクト名を比較します。テーブル名やPK優先ではありません。
+        // Within an object type, pg_dump compares schema and object name, not table name or PK priority.
+        foreach (var constraint in snapshot.Constraints.Where(x => x.Type != 'f')
+                     .OrderBy(x => x.Schema, StringComparer.Ordinal).ThenBy(x => x.Name, StringComparer.Ordinal)
+                     .ThenBy(x => x.Table, StringComparer.Ordinal))
         {
+            await WriteObjectHeaderAsync(writer, $"{constraint.Table} {constraint.Name}",
+                constraint.Type == 'c' ? "CHECK CONSTRAINT" : "CONSTRAINT", constraint.Schema,
+                tableOwners.GetValueOrDefault((constraint.Schema, constraint.Table))).ConfigureAwait(false);
             var only = partitionedTables.Contains((constraint.Schema, constraint.Table)) ? string.Empty : "ONLY ";
             await writer.WriteAsync($"ALTER TABLE {only}{SqlText.Qualified(constraint.Schema, constraint.Table)} ADD CONSTRAINT " +
                 $"{SqlText.Identifier(constraint.Name)} {constraint.Definition};\n\n").ConfigureAwait(false);
         }
-        foreach (var index in snapshot.Indexes)
+        foreach (var index in snapshot.Indexes.OrderBy(x => x.Schema, StringComparer.Ordinal)
+                     .ThenBy(x => x.Name, StringComparer.Ordinal))
         {
+            await WriteObjectHeaderAsync(writer, index.Name, "INDEX", index.Schema,
+                tableOwners.GetValueOrDefault((index.Schema, index.Table))).ConfigureAwait(false);
             await writer.WriteAsync($"{index.Definition};\n").ConfigureAwait(false);
             if (index.Clustered)
                 await writer.WriteAsync($"ALTER TABLE {SqlText.Qualified(index.Schema, index.Table)} CLUSTER ON {SqlText.Identifier(index.Name)};\n").ConfigureAwait(false);
@@ -610,34 +713,38 @@ public sealed class PostgresPlainTextDumper
                 await writer.WriteAsync($"ALTER TABLE ONLY {SqlText.Qualified(index.Schema, index.Table)} REPLICA IDENTITY USING INDEX {SqlText.Identifier(index.Name)};\n").ConfigureAwait(false);
             await writer.WriteAsync('\n').ConfigureAwait(false);
         }
-        foreach (var constraint in snapshot.Constraints.Where(x => x.Type == 'f'))
+        foreach (var trigger in snapshot.Triggers.OrderBy(x => x.Schema, StringComparer.Ordinal)
+                     .ThenBy(x => x.Name, StringComparer.Ordinal).ThenBy(x => x.Table, StringComparer.Ordinal))
         {
+            await WriteObjectHeaderAsync(writer, $"{trigger.Table} {trigger.Name}", "TRIGGER", trigger.Schema,
+                tableOwners.GetValueOrDefault((trigger.Schema, trigger.Table))).ConfigureAwait(false);
+            await writer.WriteAsync($"{trigger.Definition};\n\n").ConfigureAwait(false);
+        }
+        foreach (var constraint in snapshot.Constraints.Where(x => x.Type == 'f')
+                     .OrderBy(x => x.Schema, StringComparer.Ordinal).ThenBy(x => x.Name, StringComparer.Ordinal)
+                     .ThenBy(x => x.Table, StringComparer.Ordinal))
+        {
+            await WriteObjectHeaderAsync(writer, $"{constraint.Table} {constraint.Name}", "FK CONSTRAINT", constraint.Schema,
+                tableOwners.GetValueOrDefault((constraint.Schema, constraint.Table))).ConfigureAwait(false);
             var only = partitionedTables.Contains((constraint.Schema, constraint.Table)) ? string.Empty : "ONLY ";
             await writer.WriteAsync($"ALTER TABLE {only}{SqlText.Qualified(constraint.Schema, constraint.Table)} ADD CONSTRAINT " +
                 $"{SqlText.Identifier(constraint.Name)} {constraint.Definition};\n\n").ConfigureAwait(false);
         }
-        foreach (var view in TopologicalViews(snapshot.Views))
-        {
-            var options = string.IsNullOrWhiteSpace(view.Options) ? string.Empty : $" WITH ({view.Options})";
-            await writer.WriteAsync($"CREATE VIEW {SqlText.Qualified(view.Schema, view.Name)}{options} AS\n{view.Definition.TrimEnd()};\n\n").ConfigureAwait(false);
-        }
-        foreach (var trigger in snapshot.Triggers)
-            await writer.WriteAsync($"{trigger.Definition};\n\n").ConfigureAwait(false);
     }
 
     /// <summary>
-    /// <para>権限を再構成した後、スキーマ所有者を最後に変更します。</para>
-    /// <para>Reconstructs privileges, then transfers ownership with schemas last.</para>
+    /// <para>pg_dumpと同様に、定義とデータの出力後に明示的権限を再構成します。</para>
+    /// <para>Reconstructs explicit privileges after definitions and data, matching pg_dump's ACL pass.</para>
     /// </summary>
     /// <param name="writer">SQLまたはテキストの出力先。 Destination for SQL or text output.</param>
     /// <param name="snapshot">出力対象のカタログ情報。 Catalog metadata to write.</param>
     /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
     internal static async Task WriteSecurityAsync(TextWriter writer, CatalogSnapshot snapshot)
     {
-        if (snapshot.AccessControls.Count == 0 && snapshot.Ownership.Count == 0)
+        if (snapshot.AccessControls.Count == 0)
             return;
 
-        await SectionAsync(writer, "OWNERSHIP AND PRIVILEGES").ConfigureAwait(false);
+        await SectionAsync(writer, "PRIVILEGES").ConfigureAwait(false);
 
         // テーブル単位のREVOKEは列権限も取り消すため、テーブルACLを先に再構成します。
         // A table-level REVOKE also removes column privileges, so table ACLs must
@@ -645,18 +752,25 @@ public sealed class PostgresPlainTextDumper
         foreach (var accessControl in snapshot.AccessControls.OrderBy(x => x.Column is null ? 0 : 1))
             await WriteAccessControlAsync(writer, accessControl).ConfigureAwait(false);
 
-        // 先にスキーマ所有者を変更すると内部オブジェクトの移管に必要な権限を失う可能性があります。
-        // Transfer contained objects first. Changing a schema owner earlier can remove
-        // permissions needed to finish transferring the objects inside it.
-        foreach (var ownership in snapshot.Ownership.OrderBy(x => OwnershipOrder(x.Kind)))
-        {
-            var identity = SecurityObjectIdentity(
-                ownership.Kind, ownership.Schema, ownership.Name, ownership.IdentityArguments);
-            await writer.WriteAsync(
-                $"ALTER {OwnershipKeyword(ownership.Kind)} {identity} OWNER TO {SqlText.Identifier(ownership.Owner)};\n")
-                .ConfigureAwait(false);
-        }
         await writer.WriteAsync('\n').ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// <para>pg_dumpの_printTocEntryと同様に、作成したオブジェクトの直後で所有者を設定します。</para>
+    /// <para>Sets ownership immediately after an object's definition, like pg_dump's _printTocEntry.</para>
+    /// </summary>
+    /// <param name="writer">SQLの出力先。 SQL output writer.</param>
+    /// <param name="ownership">対象の所有者情報。nullの場合は出力しません。 Ownership metadata; null emits nothing.</param>
+    /// <returns>出力完了を表すタスク。 A task representing completion of output.</returns>
+    private static async Task WriteOwnershipAsync(TextWriter writer, OwnershipInfo? ownership)
+    {
+        if (ownership is null)
+            return;
+        var identity = SecurityObjectIdentity(
+            ownership.Kind, ownership.Schema, ownership.Name, ownership.IdentityArguments);
+        await writer.WriteAsync(
+            $"ALTER {OwnershipKeyword(ownership.Kind)} {identity} OWNER TO {SqlText.Identifier(ownership.Owner)};\n\n")
+            .ConfigureAwait(false);
     }
 
     /// <summary>
@@ -780,6 +894,12 @@ public sealed class PostgresPlainTextDumper
     /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
     private static async Task WriteAccessControlAsync(TextWriter writer, AccessControlInfo accessControl)
     {
+        var name = accessControl.Kind is SecuredObjectKind.Function or SecuredObjectKind.Procedure
+            ? $"{accessControl.Name}({accessControl.IdentityArguments})" : accessControl.Name;
+        await WriteObjectHeaderAsync(writer, $"{OwnershipKeyword(accessControl.Kind)} {name}" +
+            (accessControl.Column is null ? string.Empty : $" COLUMN {accessControl.Column}"),
+            "ACL", accessControl.Kind == SecuredObjectKind.Schema ? null : accessControl.Schema,
+            accessControl.Owner).ConfigureAwait(false);
         var keyword = PrivilegeKeyword(accessControl.Kind);
         var identity = SecurityObjectIdentity(
             accessControl.Kind, accessControl.Schema, accessControl.Name, accessControl.IdentityArguments);
@@ -872,18 +992,6 @@ public sealed class PostgresPlainTextDumper
     };
 
     /// <summary>
-    /// <para>内部オブジェクトを先に、スキーマを最後にする所有者変更の順序を返します。</para>
-    /// <para>Ranks ownership changes so contained objects precede schemas.</para>
-    /// </summary>
-    /// <param name="kind">対象オブジェクトの種別。 Target object kind.</param>
-    /// <returns>通常オブジェクトは0、スキーマは1。 Zero for contained objects and one for schemas.</returns>
-    private static int OwnershipOrder(SecuredObjectKind kind) => kind switch
-    {
-        SecuredObjectKind.Schema => 1,
-        _ => 0
-    };
-
-    /// <summary>
     /// <para>SQLコメント形式のセクション見出しを出力します。</para>
     /// <para>Writes a section heading as SQL comments.</para>
     /// </summary>
@@ -919,60 +1027,67 @@ public sealed class PostgresPlainTextDumper
     }
 
     /// <summary>
-    /// <para>親テーブルを子テーブルより先に作成できる順序を返します。</para>
-    /// <para>Orders tables so parents can be created before children.</para>
+    /// <para>型を問わず同じ名前順で処理するリレーションと、その依存先です。</para>
+    /// <para>A relation and its dependencies, ordered by name regardless of relation kind.</para>
     /// </summary>
-    /// <param name="items">依存順序で並べ替える項目一覧。 Items to order by their dependencies.</param>
-    /// <returns>親テーブルを先に配置したテーブル一覧。 Tables ordered with parents first.</returns>
-    private static IReadOnlyList<TableInfo> TopologicalTables(IReadOnlyList<TableInfo> items) =>
-        TopologicalSort(items, x => x.Oid, x => x.ParentOid is uint parent ? [parent] : []);
+    private sealed record RelationDefinition(
+        uint Oid, string Schema, string Name, IReadOnlyList<uint> Dependencies,
+        TableInfo? Table = null, SequenceInfo? Sequence = null, ViewInfo? View = null);
 
     /// <summary>
-    /// <para>参照先ビューを参照元より先に作成できる順序を返します。</para>
-    /// <para>Orders views so referenced views precede their dependents.</para>
+    /// <para>pg_dumpと同様に名前順を基準とし、必要な依存先をその前へ移動します。</para>
+    /// <para>Uses pg_dump-style name ordering, moving required dependencies before their dependents.</para>
     /// </summary>
-    /// <param name="items">依存順序で並べ替える項目一覧。 Items to order by their dependencies.</param>
-    /// <returns>選択された依存先を先に配置したビュー一覧。 Views ordered with selected dependencies first.</returns>
-    private static IReadOnlyList<ViewInfo> TopologicalViews(IReadOnlyList<ViewInfo> items) =>
-        TopologicalSort(items, x => x.Oid, x => x.Dependencies);
-
-    /// <summary>
-    /// <para>選択された依存先を先に並べ、循環時も決定的な順序で処理を継続します。</para>
-    /// <para>Orders selected dependencies first and uses deterministic fallback ordering for cycles.</para>
-    /// </summary>
-    /// <param name="items">依存順序で並べ替える項目一覧。 Items to order by their dependencies.</param>
-    /// <param name="key">項目のOIDを取得する関数。 Function returning an item's OID.</param>
-    /// <param name="dependencies">項目が依存するOID一覧を取得する関数。 Function returning an item's dependency OIDs.</param>
-    /// <returns>依存先を先に配置した一覧。循環があれば決定的な順序で続行します。 Items ordered with dependencies first and deterministic fallback for cycles.</returns>
-    /// <typeparam name="T">依存順に並べる項目の型。 Type of items ordered by dependency.</typeparam>
-    private static IReadOnlyList<T> TopologicalSort<T>(
-        IReadOnlyList<T> items,
-        Func<T, uint> key,
-        Func<T, IReadOnlyList<uint>> dependencies)
+    /// <param name="snapshot">出力対象のカタログ。 Catalog selected for output.</param>
+    /// <param name="deferredColumns">既定値を後置するテーブルOIDと列名。 Table OIDs and column names with deferred defaults.</param>
+    /// <returns>テーブル・ビュー・通常シーケンスの作成順序。 Creation order of tables, views, and standalone sequences.</returns>
+    private static IReadOnlyList<RelationDefinition> OrderRelations(
+        CatalogSnapshot snapshot,
+        ISet<(uint Oid, string Name)> deferredColumns)
     {
-        var remaining = items.ToDictionary(key);
+        var tableNames = snapshot.Tables.ToDictionary(x => (x.Schema, x.Name), x => x.Oid);
+        var relations = snapshot.Tables.Select(table => new RelationDefinition(
+                table.Oid, table.Schema, table.Name,
+                (table.ParentOid is uint parent ? new[] { parent } : [])
+                    .Concat(table.Columns.Where(column => !deferredColumns.Contains((table.Oid, column.Name)))
+                        .SelectMany(column => column.SequenceDependencies)).Distinct().ToArray(),
+                Table: table))
+            .Concat(snapshot.Sequences.Where(sequence => !sequence.IsIdentity).Select(sequence =>
+                new RelationDefinition(sequence.Oid, sequence.Schema, sequence.Name,
+                    sequence.OwnedTableSchema is not null && sequence.OwnedTableName is not null &&
+                    tableNames.TryGetValue((sequence.OwnedTableSchema, sequence.OwnedTableName), out var owner)
+                        ? [owner] : [], Sequence: sequence)))
+            .Concat(snapshot.Views.Select(view =>
+                new RelationDefinition(view.Oid, view.Schema, view.Name, view.Dependencies, View: view)))
+            .OrderBy(x => x.Schema, StringComparer.Ordinal)
+            .ThenBy(x => x.Name, StringComparer.Ordinal).ThenBy(x => x.Oid).ToArray();
+
+        var byOid = relations.ToDictionary(x => x.Oid);
+        var rank = relations.Select((relation, index) => (relation.Oid, index))
+            .ToDictionary(x => x.Oid, x => x.index);
         var emitted = new HashSet<uint>();
-        var result = new List<T>(items.Count);
-        while (remaining.Count > 0)
-        {
-            var ready = remaining.Values
-                .Where(x => dependencies(x).All(d => emitted.Contains(d) || !remaining.ContainsKey(d)))
-                .OrderBy(key)
-                .ToArray();
-            if (ready.Length == 0)
-            {
-                // 循環を解決したことにはせず、最小OIDを選んで出力を決定的にし、復元時にサーバーへ検証を任せます。
-                // Views can be mutually recursive. Keep deterministic output and let PostgreSQL report it on restore.
-                ready = [remaining.Values.OrderBy(key).First()];
-            }
-            foreach (var item in ready)
-            {
-                var id = key(item);
-                remaining.Remove(id);
-                emitted.Add(id);
-                result.Add(item);
-            }
-        }
+        var visiting = new HashSet<uint>();
+        var result = new List<RelationDefinition>(relations.Length);
+
+        // 依存先のない全項目を先に出す方法では、名前順のビューなどを後ろへ押し出してしまいます。
+        // Emitting every ready item first would push alphabetically early dependent views to the end.
+        foreach (var relation in relations)
+            Visit(relation);
         return result;
+
+        // この項目を一度だけ出力し、選択済みの依存先を先に訪問します。
+        // Emit this item once, visiting selected dependencies first.
+        void Visit(RelationDefinition relation)
+        {
+            // 循環するビューのSQLを書き換える機能ではないため、再訪問を止めて復元先に検証を任せます。
+            // Cyclic view SQL is not rewritten here; stop revisiting and leave validation to the restore server.
+            if (emitted.Contains(relation.Oid) || !visiting.Add(relation.Oid))
+                return;
+            foreach (var dependency in relation.Dependencies.Where(byOid.ContainsKey).OrderBy(oid => rank[oid]))
+                Visit(byOid[dependency]);
+            visiting.Remove(relation.Oid);
+            emitted.Add(relation.Oid);
+            result.Add(relation);
+        }
     }
 }

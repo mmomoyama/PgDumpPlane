@@ -24,7 +24,8 @@ internal sealed record EnumTypeInfo(string Schema, string Name, IReadOnlyList<st
 /// <para>サーバーが生成した関数またはプロシージャの定義です。</para>
 /// <para>Contains a server-rendered function or procedure definition.</para>
 /// </summary>
-internal sealed record RoutineInfo(string Schema, string Name, string Definition);
+internal sealed record RoutineInfo(
+    string Schema, string Name, string Definition, SecuredObjectKind Kind, string IdentityArguments);
 
 /// <summary>
 /// <para>シーケンスの設定と所有列・IDENTITYとの関係です。</para>
@@ -69,7 +70,14 @@ internal sealed record ColumnInfo(
     string? Collation,
     string? Compression,
     string? NotNullConstraintName,
-    bool NotNullNoInherit);
+    bool NotNullNoInherit)
+{
+    /// <summary>
+    /// <para>既定値・生成式が参照するシーケンスのOID。文字列解析せずカタログから取得します。</para>
+    /// <para>Sequence OIDs referenced by the default or generation expression, read from catalogs rather than parsed text.</para>
+    /// </summary>
+    internal IReadOnlyList<uint> SequenceDependencies { get; init; } = [];
+}
 
 /// <summary>
 /// <para>依存順序とCREATE文に必要なテーブル・パーティション情報です。</para>
@@ -95,8 +103,8 @@ internal sealed record TableInfo(
     IReadOnlyList<ColumnInfo> Columns);
 
 /// <summary>
-/// <para>ビュー定義と、先に作成する必要のあるビューのOID一覧です。</para>
-/// <para>Contains a view definition and OIDs of views that must be created first.</para>
+/// <para>ビュー定義と、先に作成する必要のあるリレーションのOID一覧です。</para>
+/// <para>Contains a view definition and OIDs of relations that must be created first.</para>
 /// </summary>
 internal sealed record ViewInfo(uint Oid, string Schema, string Name, string Definition, string? Options, IReadOnlyList<uint> Dependencies);
 /// <summary>
