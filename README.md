@@ -115,7 +115,7 @@ understand the guard. Set `UsePsqlRestrict = false` for other SQL clients.
 ## Current scope
 
 The package supports PostgreSQL 12 through 19. PostgreSQL 19 support is based
-on PostgreSQL 19 Beta 4 and should be treated as preview support until the
+on PostgreSQL 19 RC 1 and should be treated as preview support until the
 final PostgreSQL 19 release. The package writes:
 
 - user schemas and extensions;
@@ -125,8 +125,12 @@ final PostgreSQL 19 release. The package writes:
 - table rows in PostgreSQL text `COPY` format or explicit-column `INSERT` statements;
 - primary, unique, check, exclusion, and foreign-key constraints;
 - standalone indexes, views, and triggers;
+- explicit per-column statistics targets on standalone and constraint-backed indexes;
 - ownership and explicit object or column privileges for schemas, enum types,
   routines, tables, views, and sequences.
+
+See the [PostgreSQL 19 RC 1 source review](docs/postgresql-19-rc1-review.md)
+for the upstream changes checked and local verification results.
 
 Extension statements omit an explicit `VERSION`, so the destination server
 installs its default available version. For example, pgcrypto is written as
@@ -189,15 +193,15 @@ server's major version:
 | 16 | PostgreSQL 16 catalog-compatible output |
 | 17 | `transaction_timeout` session and restore settings |
 | 18 | Virtual generated columns and named/`NO INHERIT` NOT NULL constraints |
-| 19 Beta 4 | PostgreSQL 19 catalog-compatible output; `standard_conforming_strings` is forced on while reading catalog definitions, matching PostgreSQL 19 `pg_dump` |
+| 19 RC 1 | PostgreSQL 19 catalog-compatible output; `standard_conforming_strings` is forced on while reading catalog definitions; constraint-backed index statistics targets are preserved, matching the RC 1 `pg_dump` fix |
 
 Constraint syntax introduced by newer releases is retained through
 `pg_get_constraintdef()`. Servers older than 12 and newer than 19 are rejected
 instead of risking an invalid dump. CI runs the integration test against every
-PostgreSQL major version from 12 through 18 and PostgreSQL 19 Beta 4.
+PostgreSQL major version from 12 through 18 and PostgreSQL 19 RC 1.
 
 This is not yet a byte-for-byte or feature-complete replacement for native
-`pg_dump`. Version 0.5 does not dump comments, domains, standalone composite
+`pg_dump`. The library does not dump comments, domains, standalone composite
 types, foreign tables, materialized views, large objects,
 row-security policies, publications/subscriptions, statistics objects, or
 security labels. Use the native `pg_dump` tool when those objects must be

@@ -78,26 +78,34 @@ public sealed class PgDumpFormatTests
     }
 
     /// <summary>
-    /// <para>ベータ版表記から先頭のメジャーバージョンを取得できることを確認します。</para>
-    /// <para>Verifies extraction of the major version from beta version text.</para>
+    /// <para>ベータ・RC・正式版の表記からメジャーバージョンを取得できることを確認します。</para>
+    /// <para>Verifies major-version extraction for beta, RC, and final version text.</para>
     /// </summary>
+    /// <param name="version">ダンプ内のバージョン文字列。 Version text in the dump.</param>
+    /// <param name="producer">ダンプ作成ツール。 Dump producer.</param>
     /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
-    [Fact]
-    public async Task ReadAndValidateHeaderAsync_ParsesBetaSourceMajorVersion()
+    [Theory]
+    [InlineData("19beta4", "PgDumpPlane")]
+    [InlineData("19rc1", "PgDumpPlane")]
+    [InlineData("19rc1", "pg_dump version")]
+    [InlineData("19.0", "pg_dump version")]
+    public async Task ReadAndValidateHeaderAsync_ParsesPostgres19SourceMajorVersion(string version, string producer)
     {
-        using var reader = new StringReader("""
+        using var reader = new StringReader($"""
             --
             -- PostgreSQL database dump
             --
 
-            -- Dumped from database version 19beta4
-            -- Dumped by PgDumpPlane 0.2.0
+            -- Dumped from database version {version}
+            -- Dumped by {producer} {version}
 
             """);
 
         var header = await PgDumpFormat.ReadAndValidateHeaderAsync(reader, TestContext.Current.CancellationToken);
 
         Assert.Equal(19, header.SourceMajorVersion);
+        Assert.Equal(version, header.SourceDatabaseVersion);
+        Assert.Equal(version, header.ProducerVersion);
     }
 
     /// <summary>

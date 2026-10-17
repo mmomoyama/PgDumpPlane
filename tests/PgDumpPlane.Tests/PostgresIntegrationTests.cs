@@ -12,6 +12,69 @@ namespace PgDumpPlane.Tests;
 public sealed class PostgresIntegrationTests
 {
     /// <summary>
+    /// <para>通常索引と排他制約の索引列統計ターゲットをダンプ・復元し、カタログ値を検証します。</para>
+    /// <para>Dumps and restores column targets on standalone and exclusion indexes and verifies catalog values.</para>
+    /// </summary>
+    /// <returns>往復検証を表すタスク。 A task representing round-trip verification.</returns>
+    [Fact]
+    public async Task DumpAsync_RoundTripsIndexStatisticsTargets()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("PGDUMPPLANE_TEST_CONNECTION");
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return;
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var schema = $"index_statistics_{Guid.NewGuid():N}";
+        var quoted = SqlText.Identifier(schema);
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        try
+        {
+            await using (var setup = new NpgsqlCommand($"""
+                CREATE SCHEMA {quoted};
+                CREATE TABLE {quoted}.items (col1 integer, col2 integer);
+                ALTER TABLE {quoted}.items ADD CONSTRAINT ex_with_stats
+                    EXCLUDE USING btree ((col1 + 1) WITH =, col1 WITH =, (col2 + 1) WITH =);
+                ALTER INDEX {quoted}.ex_with_stats ALTER COLUMN 1 SET STATISTICS 100;
+                ALTER INDEX {quoted}.ex_with_stats ALTER COLUMN 3 SET STATISTICS 200;
+                CREATE INDEX expression_index ON {quoted}.items ((col1 + 2));
+                ALTER INDEX {quoted}.expression_index ALTER COLUMN 1 SET STATISTICS 0;
+                """, connection))
+                await setup.ExecuteNonQueryAsync(cancellationToken);
+            var options = new PgDumpOptions { UsePsqlRestrict = false };
+            options.IncludeSchemas.Add(schema);
+            using var writer = new StringWriter();
+            await new PostgresPlainTextDumper().DumpAsync(connection, writer, options, cancellationToken);
+            var script = writer.ToString();
+            Assert.Contains($"ALTER INDEX {quoted}.\"ex_with_stats\" ALTER COLUMN 1 SET STATISTICS 100;", script);
+            Assert.Contains($"ALTER INDEX {quoted}.\"ex_with_stats\" ALTER COLUMN 3 SET STATISTICS 200;", script);
+            Assert.Contains($"ALTER INDEX {quoted}.\"expression_index\" ALTER COLUMN 1 SET STATISTICS 0;", script);
+            Assert.DoesNotContain("SET STATISTICS -1", script);
+            await using (var drop = new NpgsqlCommand($"DROP SCHEMA {quoted} CASCADE", connection))
+                await drop.ExecuteNonQueryAsync(cancellationToken);
+            await new PostgresPlainTextRestorer().RestoreAsync(connection, new StringReader(script), cancellationToken: cancellationToken);
+            await using var verify = new NpgsqlCommand("""
+                SELECT i.relname, a.attnum::integer, a.attstattarget::integer
+                FROM pg_catalog.pg_class i
+                JOIN pg_catalog.pg_namespace n ON n.oid = i.relnamespace
+                JOIN pg_catalog.pg_attribute a ON a.attrelid = i.oid
+                WHERE n.nspname = @schema AND i.relkind = 'i' AND a.attnum > 0 AND a.attstattarget >= 0
+                ORDER BY i.relname COLLATE "C", a.attnum
+                """, connection);
+            verify.Parameters.AddWithValue("schema", schema);
+            await using var reader = await verify.ExecuteReaderAsync(cancellationToken);
+            var actual = new List<(string, int, int)>();
+            while (await reader.ReadAsync(cancellationToken))
+                actual.Add((reader.GetString(0), reader.GetInt32(1), reader.GetInt32(2)));
+            Assert.Equal(new[] { ("ex_with_stats", 1, 100), ("ex_with_stats", 3, 200), ("expression_index", 1, 0) }, actual);
+        }
+        finally
+        {
+            await using var cleanup = new NpgsqlCommand($"DROP SCHEMA IF EXISTS {quoted} CASCADE", connection);
+            await cleanup.ExecuteNonQueryAsync(CancellationToken.None);
+        }
+    }
+
+    /// <summary>
     /// <para>同じDBのpg_dumpとCREATE・OWNER・COPYの並びを比較し、復元も確認します。</para>
     /// <para>Compares CREATE, OWNER, and COPY order with pg_dump on the same database and verifies restoration.</para>
     /// </summary>
@@ -54,6 +117,11 @@ public sealed class PostgresIntegrationTests
                 CREATE FUNCTION {quoted}.trigger_noop() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
                 CREATE TRIGGER a_trigger BEFORE INSERT ON {quoted}.z_table FOR EACH ROW EXECUTE FUNCTION {quoted}.trigger_noop();
                 CREATE TRIGGER z_trigger BEFORE INSERT ON {quoted}.b_identity FOR EACH ROW EXECUTE FUNCTION {quoted}.trigger_noop();
+                ALTER TABLE {quoted}.z_table ADD CONSTRAINT z_table_ex_with_stats
+                    EXCLUDE USING btree ((id + 1) WITH =);
+                ALTER INDEX {quoted}.z_table_ex_with_stats ALTER COLUMN 1 SET STATISTICS 100;
+                CREATE INDEX z_table_expression_index ON {quoted}.z_table ((id + 2));
+                ALTER INDEX {quoted}.z_table_expression_index ALTER COLUMN 1 SET STATISTICS 0;
                 """, connection))
                 await setup.ExecuteNonQueryAsync(cancellationToken);
             await using (var data = new NpgsqlCommand($"""
@@ -95,6 +163,18 @@ public sealed class PostgresIntegrationTests
 
             Assert.Equal(DefinitionAndOwnerOrder(native), DefinitionAndOwnerOrder(script));
             Assert.Equal(PostDataHeadingOrder(native), PostDataHeadingOrder(script));
+            // RC 1で修正された制約索引を含め、標準ツールと統計設定SQLの内容・順序を比較します。
+            // Compare target SQL and ordering with the RC 1 fix for constraint-backed indexes included.
+            if (connection.PostgreSqlVersion.Major >= 19)
+            {
+                var pattern = @"^ALTER INDEX [^\r\n]+ ALTER COLUMN \d+ SET STATISTICS \d+;";
+                var expectedTargets = Regex.Matches(native, pattern, RegexOptions.Multiline)
+                    .Select(match => match.Value.Replace("\"", string.Empty, StringComparison.Ordinal)).ToArray();
+                var actualTargets = Regex.Matches(script, pattern, RegexOptions.Multiline)
+                    .Select(match => match.Value.Replace("\"", string.Empty, StringComparison.Ordinal)).ToArray();
+                Assert.Equal(2, expectedTargets.Length);
+                Assert.Equal(expectedTargets, actualTargets);
+            }
             // 同じDBの標準pg_dumpと、引数なし関数およびデータ見出しを直接比較します。
             // Compare no-argument routine and data headings directly with native pg_dump on the same DB.
             foreach (var heading in Regex.Matches(native,
@@ -232,8 +312,11 @@ public sealed class PostgresIntegrationTests
     /// <para>Restores newer-version syntax to a live server and verifies the generated value.</para>
     /// </summary>
     /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
-    [Fact]
-    public async Task RestoreAsync_DowngradesNewerDumpToConnectedServer()
+    /// <param name="sourceVersion">ダンプ元のバージョン表記。 Source dump version text.</param>
+    [Theory]
+    [InlineData("19beta4")]
+    [InlineData("19rc1")]
+    public async Task RestoreAsync_DowngradesNewerDumpToConnectedServer(string sourceVersion)
     {
         // 接続文字列が未指定ならDB検証は実行せず戻ります。実機検証には環境変数が必要です。
         // Return without database verification when the connection string is absent; live checks require this environment variable.
@@ -249,7 +332,7 @@ public sealed class PostgresIntegrationTests
             -- PostgreSQL database dump
             --
 
-            -- Dumped from database version 19beta4
+            -- Dumped from database version {{sourceVersion}}
             -- Dumped by PgDumpPlane test
 
             SET transaction_timeout = 0;

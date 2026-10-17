@@ -115,12 +115,27 @@ internal sealed record ViewInfo(uint Oid, string Schema, string Name, string Def
 /// <para>Typeはp=主キー、u=一意、f=外部キー、c=CHECK、x=排他制約です。NOT NULLはColumnInfoで扱います。</para>
 /// <para>Type is p=primary, u=unique, f=foreign, c=check, or x=exclusion. NOT NULL is represented by ColumnInfo.</para>
 /// </remarks>
-internal sealed record ConstraintInfo(string Schema, string Table, string Name, char Type, string Definition);
+internal sealed record ConstraintInfo(string Schema, string Table, string Name, char Type, string Definition)
+{
+    /// <summary>制約が作成する索引名。 Name of the index created by this constraint.</summary>
+    internal string? BackingIndexName { get; init; }
+    /// <summary>索引列の明示的な統計ターゲット。 Explicit statistics targets for index columns.</summary>
+    internal IReadOnlyList<IndexColumnStatistics> IndexStatistics { get; init; } = [];
+}
 /// <summary>
 /// <para>独立索引の定義とCLUSTER・レプリカ識別設定です。</para>
 /// <para>Describes a standalone index and its clustering and replica identity settings.</para>
 /// </summary>
-internal sealed record IndexInfo(string Schema, string Table, string Name, string Definition, bool Clustered, bool ReplicaIdentity);
+internal sealed record IndexInfo(string Schema, string Table, string Name, string Definition, bool Clustered, bool ReplicaIdentity)
+{
+    /// <summary>索引列の明示的な統計ターゲット。 Explicit statistics targets for index columns.</summary>
+    internal IReadOnlyList<IndexColumnStatistics> ColumnStatistics { get; init; } = [];
+}
+/// <summary>
+/// <para>索引列の位置と統計ターゲットです。通常のテーブル列名ではなく1始まりの位置を使用します。</para>
+/// <para>An index column's position and statistics target, using a one-based position rather than a table column name.</para>
+/// </summary>
+internal sealed record IndexColumnStatistics(int ColumnNumber, int Target);
 /// <summary>
 /// <para>ユーザー定義トリガーの対象テーブルと定義です。</para>
 /// <para>Describes a user trigger's target table and definition.</para>

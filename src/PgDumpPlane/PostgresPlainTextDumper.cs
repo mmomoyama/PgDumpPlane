@@ -677,7 +677,7 @@ public sealed class PostgresPlainTextDumper
     /// <param name="writer">SQLまたはテキストの出力先。 Destination for SQL or text output.</param>
     /// <param name="snapshot">出力対象のカタログ情報。 Catalog metadata to write.</param>
     /// <returns>処理完了を表すタスク。 A task representing completion of the operation.</returns>
-    private static async Task WritePostDataAsync(TextWriter writer, CatalogSnapshot snapshot)
+    internal static async Task WritePostDataAsync(TextWriter writer, CatalogSnapshot snapshot)
     {
         await SectionAsync(writer, "POST-DATA").ConfigureAwait(false);
         var partitionedTables = snapshot.Tables
@@ -700,6 +700,10 @@ public sealed class PostgresPlainTextDumper
             var only = partitionedTables.Contains((constraint.Schema, constraint.Table)) ? string.Empty : "ONLY ";
             await writer.WriteAsync($"ALTER TABLE {only}{SqlText.Qualified(constraint.Schema, constraint.Table)} ADD CONSTRAINT " +
                 $"{SqlText.Identifier(constraint.Name)} {constraint.Definition};\n\n").ConfigureAwait(false);
+            // PostgreSQL 19 RC 1と同様、制約による索引の統計設定も制約作成後に出力します。
+            // Like PostgreSQL 19 RC 1, emit backing-index statistics after creating the constraint.
+            if (constraint.BackingIndexName is { } indexName)
+                await WriteIndexStatisticsAsync(writer, constraint.Schema, indexName, constraint.IndexStatistics).ConfigureAwait(false);
         }
         foreach (var index in snapshot.Indexes.OrderBy(x => x.Schema, StringComparer.Ordinal)
                      .ThenBy(x => x.Name, StringComparer.Ordinal))
@@ -709,6 +713,7 @@ public sealed class PostgresPlainTextDumper
             await writer.WriteAsync($"{index.Definition};\n").ConfigureAwait(false);
             if (index.Clustered)
                 await writer.WriteAsync($"ALTER TABLE {SqlText.Qualified(index.Schema, index.Table)} CLUSTER ON {SqlText.Identifier(index.Name)};\n").ConfigureAwait(false);
+            await WriteIndexStatisticsAsync(writer, index.Schema, index.Name, index.ColumnStatistics).ConfigureAwait(false);
             if (index.ReplicaIdentity)
                 await writer.WriteAsync($"ALTER TABLE ONLY {SqlText.Qualified(index.Schema, index.Table)} REPLICA IDENTITY USING INDEX {SqlText.Identifier(index.Name)};\n").ConfigureAwait(false);
             await writer.WriteAsync('\n').ConfigureAwait(false);
@@ -730,6 +735,25 @@ public sealed class PostgresPlainTextDumper
             await writer.WriteAsync($"ALTER TABLE {only}{SqlText.Qualified(constraint.Schema, constraint.Table)} ADD CONSTRAINT " +
                 $"{SqlText.Identifier(constraint.Name)} {constraint.Definition};\n\n").ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// <para>索引列の統計ターゲットを復元します。列位置は引用識別子ではなく数値で出力します。</para>
+    /// <para>Restores index column statistics targets, rendering column positions as numbers rather than quoted identifiers.</para>
+    /// </summary>
+    /// <param name="writer">SQLの出力先。 SQL writer.</param>
+    /// <param name="schema">索引のスキーマ。 Index schema.</param>
+    /// <param name="name">索引名。 Index name.</param>
+    /// <param name="statistics">明示的な統計設定。 Explicit statistics settings.</param>
+    /// <returns>出力完了を表すタスク。 A task representing output completion.</returns>
+    private static async Task WriteIndexStatisticsAsync(
+        TextWriter writer, string schema, string name, IReadOnlyList<IndexColumnStatistics> statistics)
+    {
+        foreach (var column in statistics.OrderBy(x => x.ColumnNumber))
+            await writer.WriteAsync($"ALTER INDEX {SqlText.Qualified(schema, name)} " +
+                $"ALTER COLUMN {SqlText.Number(column.ColumnNumber)} SET STATISTICS {SqlText.Number(column.Target)};\n").ConfigureAwait(false);
+        if (statistics.Count > 0)
+            await writer.WriteAsync('\n').ConfigureAwait(false);
     }
 
     /// <summary>

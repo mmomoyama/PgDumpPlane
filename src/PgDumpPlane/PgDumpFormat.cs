@@ -24,15 +24,15 @@ internal sealed record PgDumpHeader(
     string ProducerVersion)
 {
     /// <summary>
-    /// <para>ベータ版を含む作成元DBの表記からメジャーバージョンを取得します。</para>
-    /// <para>Gets the source database major version, including beta version notation.</para>
+    /// <para>ベータ版・RC版を含む作成元DBの表記からメジャーバージョンを取得します。</para>
+    /// <para>Gets the source database major version, including beta and release-candidate notation.</para>
     /// </summary>
     internal int SourceMajorVersion
     {
         get
         {
-            // 19beta4などをVersion.Parseへ渡さず、先頭の数字だけをメジャーバージョンとして取得します。
-            // Extract leading digits for versions such as 19beta4 rather than passing them to Version.Parse.
+            // 19beta4・19rc1などをVersion.Parseへ渡さず、先頭の数字だけを取得します。
+            // Extract leading digits for versions such as 19beta4 or 19rc1 rather than using Version.Parse.
             var digits = SourceDatabaseVersion.AsSpan().TrimStart();
             var length = 0;
             while (length < digits.Length && char.IsDigit(digits[length]))

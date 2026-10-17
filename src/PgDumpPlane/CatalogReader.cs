@@ -512,10 +512,15 @@ internal static class CatalogReader
     {
         const string sql = """
             SELECT n.nspname, c.relname, con.conname, con.contype::text,
-                   pg_catalog.pg_get_constraintdef(con.oid, true), con.conrelid
+                   pg_catalog.pg_get_constraintdef(con.oid, true), con.conrelid, ci.relname,
+                   ARRAY(SELECT a.attnum::integer FROM pg_catalog.pg_attribute a
+                         WHERE a.attrelid = ci.oid AND a.attnum > 0 AND a.attstattarget >= 0 ORDER BY a.attnum),
+                   ARRAY(SELECT a.attstattarget::integer FROM pg_catalog.pg_attribute a
+                         WHERE a.attrelid = ci.oid AND a.attnum > 0 AND a.attstattarget >= 0 ORDER BY a.attnum)
             FROM pg_catalog.pg_constraint con
             JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_catalog.pg_class ci ON ci.oid = con.conindid AND con.contype IN ('p', 'u', 'x')
             WHERE con.contype IN ('p', 'u', 'f', 'c', 'x')
               AND con.conparentid = 0
               AND con.conislocal
@@ -528,7 +533,11 @@ internal static class CatalogReader
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             if (selectedOids.Contains(reader.GetFieldValue<uint>(5)))
-                result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3)[0], reader.GetString(4)));
+                result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3)[0], reader.GetString(4))
+                {
+                    BackingIndexName = GetNullableString(reader, 6),
+                    IndexStatistics = ReadIndexColumnStatistics(reader, 7, 8)
+                });
         }
         return result;
     }
@@ -548,7 +557,11 @@ internal static class CatalogReader
     {
         const string sql = """
             SELECT n.nspname, t.relname, i.relname, pg_catalog.pg_get_indexdef(i.oid),
-                   x.indisclustered, x.indisreplident, t.oid
+                   x.indisclustered, x.indisreplident, t.oid,
+                   ARRAY(SELECT a.attnum::integer FROM pg_catalog.pg_attribute a
+                         WHERE a.attrelid = i.oid AND a.attnum > 0 AND a.attstattarget >= 0 ORDER BY a.attnum),
+                   ARRAY(SELECT a.attstattarget::integer FROM pg_catalog.pg_attribute a
+                         WHERE a.attrelid = i.oid AND a.attnum > 0 AND a.attstattarget >= 0 ORDER BY a.attnum)
             FROM pg_catalog.pg_index x
             JOIN pg_catalog.pg_class i ON i.oid = x.indexrelid
             JOIN pg_catalog.pg_class t ON t.oid = x.indrelid
@@ -563,9 +576,28 @@ internal static class CatalogReader
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             if (selectedOids.Contains(reader.GetFieldValue<uint>(6)))
-                result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetBoolean(4), reader.GetBoolean(5)));
+                result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetBoolean(4), reader.GetBoolean(5))
+                {
+                    ColumnStatistics = ReadIndexColumnStatistics(reader, 7, 8)
+                });
         }
         return result;
+    }
+
+    /// <summary>
+    /// <para>同じ列順のカタログ配列を統計設定へ変換します。既定値（-1またはNULL）はSQL側で除外します。</para>
+    /// <para>Pairs catalog arrays in column order; SQL filters out default targets (-1 or NULL).</para>
+    /// </summary>
+    /// <param name="reader">カタログの読み取り元。 Catalog reader.</param>
+    /// <param name="columnsOrdinal">列位置の配列フィールド。 Field containing column positions.</param>
+    /// <param name="targetsOrdinal">統計ターゲットの配列フィールド。 Field containing statistics targets.</param>
+    /// <returns>明示的な索引列統計設定。 Explicit index column statistics settings.</returns>
+    private static IReadOnlyList<IndexColumnStatistics> ReadIndexColumnStatistics(
+        NpgsqlDataReader reader, int columnsOrdinal, int targetsOrdinal)
+    {
+        var columns = reader.GetFieldValue<int[]>(columnsOrdinal);
+        var targets = reader.GetFieldValue<int[]>(targetsOrdinal);
+        return columns.Select((column, index) => new IndexColumnStatistics(column, targets[index])).ToArray();
     }
 
     /// <summary>

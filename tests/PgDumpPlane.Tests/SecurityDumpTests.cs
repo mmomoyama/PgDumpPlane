@@ -7,6 +7,37 @@ namespace PgDumpPlane.Tests;
 public sealed class SecurityDumpTests
 {
     /// <summary>
+    /// <para>RC 1のpg_dumpと同様に、独立索引と制約索引の統計ターゲットを作成後に出力することを確認します。</para>
+    /// <para>Checks that standalone and constraint-backed index targets follow their definitions, like RC 1 pg_dump.</para>
+    /// </summary>
+    /// <returns>出力検証を表すタスク。 A task representing output verification.</returns>
+    [Fact]
+    public async Task WritePostDataAsync_PreservesIndexStatisticsTargets()
+    {
+        var snapshot = Snapshot([], []) with
+        {
+            Constraints = [new("odd\"schema", "items", "exclude_values", 'x', "EXCLUDE USING btree ((id + 1) WITH =)")
+            {
+                BackingIndexName = "backing\"index",
+                IndexStatistics = [new(3, 200), new(1, 100)]
+            }],
+            Indexes = [new("odd\"schema", "items", "expression_index", "CREATE INDEX expression_index ON items ((id + 1))", false, false)
+            {
+                ColumnStatistics = [new(1, 0)]
+            }]
+        };
+        using var writer = new StringWriter();
+        await PostgresPlainTextDumper.WritePostDataAsync(writer, snapshot);
+        var sql = writer.ToString();
+        Assert.Contains("ALTER INDEX \"odd\"\"schema\".\"backing\"\"index\" ALTER COLUMN 1 SET STATISTICS 100;\n" +
+            "ALTER INDEX \"odd\"\"schema\".\"backing\"\"index\" ALTER COLUMN 3 SET STATISTICS 200;", sql);
+        Assert.Contains("ALTER INDEX \"odd\"\"schema\".\"expression_index\" ALTER COLUMN 1 SET STATISTICS 0;", sql);
+        Assert.True(sql.IndexOf("ADD CONSTRAINT", StringComparison.Ordinal) < sql.IndexOf("SET STATISTICS 100", StringComparison.Ordinal));
+        Assert.True(sql.IndexOf("CREATE INDEX", StringComparison.Ordinal) < sql.IndexOf("SET STATISTICS 0", StringComparison.Ordinal));
+        Assert.DoesNotContain("ALTER COLUMN \"1\"", sql);
+    }
+
+    /// <summary>
     /// <para>入力順によらず、public所有者変更がpgcrypto拡張の前に出ることを確認します。</para>
     /// <para>Checks that public ownership precedes the pgcrypto extension regardless of input order.</para>
     /// </summary>
